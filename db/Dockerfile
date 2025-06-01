@@ -21,8 +21,7 @@
     # アプリケーションをビルド
     # CGO_ENABLED=0 で静的リンクし、OS依存を減らす
     # -ldflags="-s -w" でデバッグ情報を削除しバイナリサイズを削減
-    # -trimpath でビルドパス情報を削除
-    RUN CGO_ENABLED=0 GOOS=linux go build -v -ldflags="-s -w -trimpath" -o /server .
+    RUN CGO_ENABLED=0 GOOS=linux go build -v -ldflags="-s -w" -o /server .
     
     # --- 実行ステージ ---
     FROM alpine:latest
