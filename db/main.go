@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings" // stringsパッケージをインポート
 	"syscall"
 	"time"
 
@@ -23,49 +24,86 @@ type User struct {
 	Age  int    `json:"age"`
 }
 
-// ① GoプログラムからMySQLへ接続
 var db *sql.DB
 
+// Ternary is a helper function for conditional expressions (like a ? b : c)
+func Ternary[T any](condition bool, trueVal, falseVal T) T {
+	if condition {
+		return trueVal
+	}
+	return falseVal
+}
+
 func init() {
-	// .env ファイルから環境変数を読み込む (ローカル開発時のみ)
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" { // Cloud Run環境でない場合
+	log.Println("-------------------- DEBUG: init() started --------------------")
+
+	isCloudRun := os.Getenv("K_SERVICE") != ""
+
+	if isCloudRun {
+		log.Println("DEBUG_INIT: Detected Cloud Run environment (K_SERVICE is set).")
+		log.Printf("DEBUG_INIT: K_SERVICE env: [%s]\n", os.Getenv("K_SERVICE"))
+		log.Printf("DEBUG_INIT: GOOGLE_CLOUD_PROJECT env: [%s]\n", os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	} else {
+		log.Println("DEBUG_INIT: Not a Cloud Run environment. Attempting to load .env file.")
 		if err := godotenv.Load(); err != nil {
-			log.Println("Warning: .env file not found, attempting to use system environment variables for local development")
+			log.Printf("DEBUG_INIT: Warning - .env file not found or error loading: %v. Will use system environment variables.\n", err)
+		} else {
+			log.Println("DEBUG_INIT: Successfully loaded .env file for local development.")
 		}
 	}
 
-	mysqlUser := os.Getenv("MYSQL_USER")
-	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD")
-	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
+	mysqlUser := strings.TrimSpace(os.Getenv("MYSQL_USER"))
+	log.Printf("DEBUG_INIT: MYSQL_USER: [%s]\n", mysqlUser)
+	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD") // パスワードはログに直接値を出力しない
+	if mysqlUserPwd != "" {
+		log.Println("DEBUG_INIT: MYSQL_PASSWORD is set (not empty)")
+	} else {
+		log.Println("DEBUG_INIT: MYSQL_PASSWORD is NOT set (empty)")
+	}
+	mysqlDatabase := strings.TrimSpace(os.Getenv("MYSQL_DATABASE"))
+	log.Printf("DEBUG_INIT: MYSQL_DATABASE: [%s]\n", mysqlDatabase)
+
 
 	var dsn string
-	// Cloud Run上では環境変数 GOOGLE_CLOUD_PROJECT が設定されることを利用する
-	// または、独自の環境変数 (例: RUN_ENV=production) などで制御する
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" { // Cloud Run環境を想定 (INSTANCE_CONNECTION_NAME を使用)c
-		instanceConnectionName := "term7-459800:us-central1:uttc" //os.Getenv("INSTANCE_CONNECTION_NAME") // 例: my-project:us-central1:my-instance
-		if instanceConnectionName == "" {
-			log.Fatal("INSTANCE_CONNECTION_NAME environment variable not set for Cloud Run")
-		}
-		// /cloudsql/ は一般的なディレクトリだが、環境変数 DB_SOCKET_DIR で変更可能にする
-		socketDir := os.Getenv("DB_SOCKET_DIR")
+	if isCloudRun {
+		log.Println("DEBUG_INIT: Configuring DSN for Cloud Run (Unix socket) WITH HARDCODED INSTANCE_CONNECTION_NAME")
+		
+		// ▼▼▼ INSTANCE_CONNECTION_NAME を直接書き込む ▼▼▼
+		instanceConnectionName := "term7-459800:us-central1:uttc" // あなたの実際のインスタンス接続名に置き換えてください
+		log.Printf("DEBUG_INIT: HARDCODED INSTANCE_CONNECTION_NAME: [%s]\n", instanceConnectionName)
+		// ▲▲▲ INSTANCE_CONNECTION_NAME を直接書き込む ▲▲▲
+
+		// socketDirはオプションなので、未設定の場合はデフォルト値を使用
+		socketDir := strings.TrimSpace(os.Getenv("DB_SOCKET_DIR"))
+		log.Printf("DEBUG_INIT: Raw DB_SOCKET_DIR from env: [%s]\n", os.Getenv("DB_SOCKET_DIR"))
 		if socketDir == "" {
 			socketDir = "/cloudsql"
+			log.Printf("DEBUG_INIT: DB_SOCKET_DIR not set or empty, defaulting to: %s\n", socketDir)
+		} else {
+			log.Printf("DEBUG_INIT: Trimmed DB_SOCKET_DIR: [%s]\n", socketDir)
 		}
+		
 		dsn = fmt.Sprintf("%s:%s@unix(%s/%s)/%s?parseTime=true",
 			mysqlUser,
 			mysqlUserPwd,
 			socketDir,
-			instanceConnectionName,
+			instanceConnectionName, // ハードコードされた値が使われる
 			mysqlDatabase)
-		log.Println("✅ DB接続にUnixソケットを使用します")
-	} else { // ローカル開発環境またはその他の環境 (TCP接続)
-		mysqlHost := os.Getenv("MYSQL_HOST")
-		mysqlPort := os.Getenv("MYSQL_PORT")
+		log.Println("DEBUG_INIT: ✅ DB DSN for Unix socket constructed.")
+
+	} else { // ローカル開発環境など
+		log.Println("DEBUG_INIT: Configuring DSN for local development (TCP)")
+		mysqlHost := strings.TrimSpace(os.Getenv("MYSQL_HOST"))
+		mysqlPort := strings.TrimSpace(os.Getenv("MYSQL_PORT"))
+		// ... (ローカル開発用のMYSQL_HOST, MYSQL_PORTのログ出力とデフォルト値設定) ...
+		log.Printf("DEBUG_INIT: Trimmed MYSQL_HOST (local): [%s]\n", mysqlHost)
+		log.Printf("DEBUG_INIT: Trimmed MYSQL_PORT (local): [%s]\n", mysqlPort)
 		if mysqlPort == "" {
-			mysqlPort = "3306" // デフォルトポート
+			mysqlPort = "3306"
+			log.Printf("DEBUG_INIT: MYSQL_PORT (local) was empty, defaulting to: %s\n", mysqlPort)
 		}
-		if mysqlHost == "" {
-			log.Fatal("MYSQL_HOST environment variable not set for local development")
+		if mysqlHost == "" { // ローカルではMYSQL_HOSTは必須
+			log.Fatal("FATAL_INIT: MYSQL_HOST environment variable not set for local development.")
 		}
 		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true",
 			mysqlUser,
@@ -73,24 +111,43 @@ func init() {
 			mysqlHost,
 			mysqlPort,
 			mysqlDatabase)
-		log.Println("✅ DB接続にTCPを使用します")
+		log.Println("DEBUG_INIT: ✅ DB DSN for TCP constructed.")
 	}
 
+	// 必須環境変数の共通チェック
+	if mysqlUser == "" {
+		log.Fatal("FATAL_INIT: MYSQL_USER environment variable is not set.")
+	}
+	if mysqlUserPwd == "" {
+		log.Fatal("FATAL_INIT: MYSQL_PASSWORD environment variable is not set.")
+	}
+	if mysqlDatabase == "" {
+		log.Fatal("FATAL_INIT: MYSQL_DATABASE environment variable is not set.")
+	}
+
+
+	maskedDsnForLog := fmt.Sprintf("%s:******@%s.../%s (type: %s)", mysqlUser, Ternary(isCloudRun, "unix(", "tcp("), mysqlDatabase, Ternary(isCloudRun, "unix", "tcp"))
+	log.Printf("DEBUG_INIT: Attempting sql.Open() with DSN (masked): %s\n", maskedDsnForLog)
+
+	var err error
 	_db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Fatalf("fail: sql.Open, dsn: %s, error: %v\n", dsn, err)
+		log.Fatalf("FATAL_INIT: sql.Open failed. DSN (masked): %s. Error: %v\n", maskedDsnForLog, err)
 	}
+	log.Println("DEBUG_INIT: sql.Open() successful.")
 
-	// 接続プール設定 (任意だが推奨)
-	_db.SetMaxOpenConns(25)
-	_db.SetMaxIdleConns(25)
+	_db.SetMaxOpenConns(10)
+	_db.SetMaxIdleConns(10)
 	_db.SetConnMaxLifetime(5 * time.Minute)
+	log.Println("DEBUG_INIT: Database connection pool configured.")
 
+	log.Println("DEBUG_INIT: Attempting _db.Ping()...")
 	if err := _db.Ping(); err != nil {
-		log.Fatalf("fail: _db.Ping, dsn: %s, error: %v\n", dsn, err)
+		log.Fatalf("FATAL_INIT: _db.Ping failed. DSN (masked): %s. Error: %v\n", maskedDsnForLog, err)
 	}
 	db = _db
-	log.Println("✅ DB接続に成功しました")
+	log.Println("DEBUG_INIT: ✅ DB接続に成功しました.")
+	log.Println("-------------------- DEBUG: init() finished --------------------")
 }
 
 func userHandler(w http.ResponseWriter, r *http.Request) {
