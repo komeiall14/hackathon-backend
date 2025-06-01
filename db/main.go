@@ -23,14 +23,13 @@ type User struct {
 	Age  int    `json:"age"`
 }
 
-// ① GoプログラムからMySQLへ接続
 var db *sql.DB
 
 func init() {
-	// .env ファイルから環境変数を読み込む (ローカル開発時のみ)
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" { // Cloud Run環境でない場合
+	// Cloud Run環境でない場合（ローカル開発時など）に .env ファイルを読み込む
+	if os.Getenv("K_SERVICE") == "" { // K_SERVICEはCloud Runが自動で設定する環境変数の一つ
 		if err := godotenv.Load(); err != nil {
-			log.Println("Warning: .env file not found, attempting to use system environment variables for local development")
+			log.Println("Warning: .env file not found or error loading, attempting to use system environment variables for local development")
 		}
 	}
 
@@ -39,17 +38,16 @@ func init() {
 	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
 
 	var dsn string
-	// Cloud Run上では環境変数 GOOGLE_CLOUD_PROJECT が設定されることを利用する
-	// または、独自の環境変数 (例: RUN_ENV=production) などで制御する
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" { // Cloud Run環境を想定 (INSTANCE_CONNECTION_NAME を使用)
-		instanceConnectionName := os.Getenv("INSTANCE_CONNECTION_NAME") // 例: my-project:us-central1:my-instance
+	// Cloud Run環境では環境変数 K_SERVICE が設定されることを利用する
+	if os.Getenv("K_SERVICE") != "" { // Cloud Run環境を想定 (INSTANCE_CONNECTION_NAME を使用)
+		instanceConnectionName := os.Getenv("INSTANCE_CONNECTION_NAME")
 		if instanceConnectionName == "" {
-			log.Fatal("INSTANCE_CONNECTION_NAME environment variable not set for Cloud Run")
+			log.Fatal("FATAL: INSTANCE_CONNECTION_NAME environment variable not set for Cloud Run")
 		}
 		// /cloudsql/ は一般的なディレクトリだが、環境変数 DB_SOCKET_DIR で変更可能にする
 		socketDir := os.Getenv("DB_SOCKET_DIR")
 		if socketDir == "" {
-			socketDir = "/cloudsql"
+			socketDir = "/cloudsql" // Cloud RunのデフォルトのUnixソケットディレクトリ
 		}
 		dsn = fmt.Sprintf("%s:%s@unix(%s/%s)/%s?parseTime=true",
 			mysqlUser,
@@ -57,7 +55,7 @@ func init() {
 			socketDir,
 			instanceConnectionName,
 			mysqlDatabase)
-		log.Println("✅ DB接続にUnixソケットを使用します")
+		log.Println("✅ DB接続にUnixソケットを使用します (Cloud Run environment)")
 	} else { // ローカル開発環境またはその他の環境 (TCP接続)
 		mysqlHost := os.Getenv("MYSQL_HOST")
 		mysqlPort := os.Getenv("MYSQL_PORT")
@@ -65,7 +63,7 @@ func init() {
 			mysqlPort = "3306" // デフォルトポート
 		}
 		if mysqlHost == "" {
-			log.Fatal("MYSQL_HOST environment variable not set for local development")
+			log.Fatal("FATAL: MYSQL_HOST environment variable not set for local development")
 		}
 		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true",
 			mysqlUser,
@@ -73,21 +71,26 @@ func init() {
 			mysqlHost,
 			mysqlPort,
 			mysqlDatabase)
-		log.Println("✅ DB接続にTCPを使用します")
+		log.Println("✅ DB接続にTCPを使用します (Local environment)")
 	}
+
+	if mysqlUser == "" || mysqlUserPwd == "" || mysqlDatabase == "" {
+		log.Fatal("FATAL: MYSQL_USER, MYSQL_PASSWORD, or MYSQL_DATABASE environment variable is not set.")
+	}
+
+	log.Printf("Attempting to connect with DSN (password masked): %s:******@.../%s\n", mysqlUser, mysqlDatabase)
 
 	_db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Fatalf("fail: sql.Open, dsn: %s, error: %v\n", dsn, err)
+		log.Fatalf("FATAL: sql.Open failed, dsn: %s, error: %v\n", dsn, err)
 	}
 
-	// 接続プール設定 (任意だが推奨)
-	_db.SetMaxOpenConns(25)
-	_db.SetMaxIdleConns(25)
+	_db.SetMaxOpenConns(10) // 少し控えめに設定
+	_db.SetMaxIdleConns(10)
 	_db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := _db.Ping(); err != nil {
-		log.Fatalf("fail: _db.Ping, dsn: %s, error: %v\n", dsn, err)
+		log.Fatalf("FATAL: _db.Ping failed, dsn (password masked): %s:******@.../%s, error: %v\n", mysqlUser, mysqlDatabase, err)
 	}
 	db = _db
 	log.Println("✅ DB接続に成功しました")
@@ -128,7 +131,6 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(users) == 0 {
-			// http.NotFound(w, r) でも良いが、JSONレスポンスで統一するなら以下
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte(`{"message": "No users found"}`))
@@ -156,13 +158,12 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// バリデーション
 		if reqUser.Name == "" {
 			log.Println("fail: POST request with empty name")
 			http.Error(w, `{"error": "Name is required"}`, http.StatusBadRequest)
 			return
 		}
-		if len(reqUser.Name) > 50 { // 例: 名前の長さに制限を設ける
+		if len(reqUser.Name) > 50 {
 			log.Println("fail: POST request with name too long")
 			http.Error(w, `{"error": "Name must be 50 characters or less"}`, http.StatusBadRequest)
 			return
@@ -173,40 +174,34 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// ULIDの生成
-		t := time.Now().UTC() // UTCを推奨
+		t := time.Now().UTC()
 		entropy := ulid.Monotonic(rand.New(rand.NewSource(t.UnixNano())), 0)
 		newID := ulid.MustNew(ulid.Timestamp(t), entropy).String()
 
-		// ▼▼▼ ここからデバッグログ追加 ▼▼▼
-		log.Println("POSTリクエスト処理開始 - ULID対応版") // どのコードブロックが実行されているかの確認用
-		log.Printf("生成されたULID: %s, Name: %s, Age: %d\n", newID, reqUser.Name, reqUser.Age)
-		// ▲▲▲ ここまでデバッグログ追加 ▲▲▲
+		log.Printf("Attempting to INSERT user with ID: %s, Name: %s, Age: %d\n", newID, reqUser.Name, reqUser.Age)
 
 		tx, err := db.Begin()
 		if err != nil {
 			log.Printf("fail: db.Begin, %v\n", err)
-			http.Error(w, `{"error": "Internal server error"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error": "Internal server error on db.Begin"}`, http.StatusInternalServerError)
 			return
 		}
-		// defer tx.Rollback() はエラー時にのみ呼び出されるようにする
-		// 成功時は tx.Commit() が呼ばれる
 
 		_, err = tx.Exec("INSERT INTO user (id, name, age) VALUES (?, ?, ?)", newID, reqUser.Name, reqUser.Age)
 		if err != nil {
-			tx.Rollback() // INSERT失敗時はロールバック
+			tx.Rollback()
 			log.Printf("fail: tx.Exec INSERT user, %v\n", err)
 			http.Error(w, `{"error": "Failed to create user"}`, http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ tx.Exec INSERT user success for ID: %s\n", newID)
 
 		if err := tx.Commit(); err != nil {
-			// Commitが失敗した場合、既にExecが成功していてもロールバックを試みるのは難しい
-			// (DBによっては自動ロールバックされるが、基本はExecとCommitは一体)
 			log.Printf("fail: tx.Commit, %v\n", err)
 			http.Error(w, `{"error": "Failed to commit transaction"}`, http.StatusInternalServerError)
 			return
 		}
+		log.Println("✅ tx.Commit success")
 
 		res := struct {
 			Id string `json:"id"`
@@ -214,12 +209,11 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 		resBytes, err := json.Marshal(res)
 		if err != nil {
 			log.Printf("fail: json.Marshal created user ID, %v\n", err)
-			// この時点でDBへの登録は成功しているので、クライアントには成功を伝えるがログは残す
 			http.Error(w, `{"error": "Internal server error generating response"}`, http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated) // 201 Created がより適切
+		w.WriteHeader(http.StatusCreated)
 		w.Write(resBytes)
 
 	default:
@@ -228,7 +222,6 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// allUsersHandler は /users (複数形) で全ユーザー情報を返すエンドポイントの例
 func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		log.Printf("fail: HTTP Method %s not allowed for /users\n", r.Method)
@@ -236,7 +229,7 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := db.Query("SELECT id, name, age FROM user ORDER BY name") // 例: 名前順で取得
+	rows, err := db.Query("SELECT id, name, age FROM user ORDER BY name")
 	if err != nil {
 		log.Printf("fail: db.Query for all users, %v\n", err)
 		http.Error(w, `{"error": "Internal server error"}`, http.StatusInternalServerError)
@@ -271,14 +264,12 @@ func allUsersHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-
 func main() {
-	http.HandleFunc("/user", userHandler) // 単数形エンドポイント (特定のユーザー操作)
-	http.HandleFunc("/users", allUsersHandler) // 複数形エンドポイント (全ユーザー取得など) [cite: 79]
+	log.Println("🚀 Server starting...")
 
-	// Ctrl+CでHTTPサーバー停止時にDBをクローズする
-	// この関数はメインゴルーチンをブロックしないように最後に呼び出すか、
-	// ListenAndServe のエラーハンドリングと組み合わせる
+	http.HandleFunc("/user", userHandler)
+	http.HandleFunc("/users", allUsersHandler)
+
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -289,26 +280,30 @@ func main() {
 	serverAddr := fmt.Sprintf(":%s", port)
 	log.Printf("✅ Listening on port %s...\n", port)
 
+	// HTTPサーバーをゴルーチンで起動し、エラーハンドリングを行う
 	go func() {
 		if err := http.ListenAndServe(serverAddr, nil); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Could not listen on %s: %v\n", serverAddr, err)
+			log.Fatalf("FATAL: Could not listen on %s: %v\n", serverAddr, err)
 		}
 	}()
+	log.Println("✅ HTTP server is serving")
+
 
 	// Graceful shutdown
-	s := <-stopChan
-	log.Printf("received syscall: %v, initiating graceful shutdown...", s)
-	// ここでシャットダウン処理 (例: 実行中のリクエストの完了を待つ) を行う
+	s := <-stopChan // ここでシグナルを待つ
+	log.Printf("ℹ️ Received syscall: %v, initiating graceful shutdown...", s)
+	
+	// ここでシャットダウン前の処理（例: 進行中のリクエストの完了を待つなど）を実装できる
 	// 今回はDBクローズのみ
 	if db != nil {
+		log.Println("ℹ️ Closing database connection...")
 		if err := db.Close(); err != nil {
 			log.Printf("Error closing database: %v\n", err)
 		} else {
 			log.Println("✅ Database connection closed successfully.")
 		}
 	}
-	log.Println("Server shut down gracefully.")
-	os.Exit(0) // これがないと `go run` が終了しない場合がある
+	log.Println("✅ Server shut down gracefully.")
+	// os.Exit(0) は通常、Graceful Shutdownの最後に実行されるか、
+	// シグナルハンドラとは別にメインゴルーチンが終了することで自然に終了するのを待つ
 }
-
-// closeDBWithSysCall は main 関数に統合したため不要
