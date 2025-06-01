@@ -1,0 +1,17 @@
+# hackathon-backend/.gitignore
+
+# ローカル環境設定ファイル
+/.env
+
+# Goのビルド成果物
+/server
+*.exe
+*.out
+
+# OS固有のファイル
+.DS_Store
+Thumbs.db
+
+# IDEやエディタの設定ファイル
+.idea/
+.vscode/
