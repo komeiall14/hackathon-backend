@@ -41,7 +41,7 @@ func init() {
 	var dsn string
 	// Cloud Run上では環境変数 GOOGLE_CLOUD_PROJECT が設定されることを利用する
 	// または、独自の環境変数 (例: RUN_ENV=production) などで制御する
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" { // Cloud Run環境を想定 (INSTANCE_CONNECTION_NAME を使用)
+	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" { // Cloud Run環境を想定 (INSTANCE_CONNECTION_NAME を使用)c
 		instanceConnectionName := "term7-459800:us-central1:uttc" //os.Getenv("INSTANCE_CONNECTION_NAME") // 例: my-project:us-central1:my-instance
 		if instanceConnectionName == "" {
 			log.Fatal("INSTANCE_CONNECTION_NAME environment variable not set for Cloud Run")
