@@ -18,6 +18,13 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
+func Ternary[T any](condition bool, trueVal, falseVal T) T {
+	if condition {
+		return trueVal
+	}
+	return falseVal
+}
+
 type User struct {
 	Id   string `json:"id"`
 	Name string `json:"name"`
