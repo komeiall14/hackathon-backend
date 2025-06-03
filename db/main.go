@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time" // ULID生成のために追加
+	// "time" // ulid.Make()が引数を取らない場合、直接は不要になる可能性がありますが、他の用途でtimeを使っている場合は残します。
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
@@ -62,7 +62,7 @@ func init() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*") // フロントエンドのオリジンに合わせて変更推奨
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -159,21 +159,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Name is too long (max 50 characters)", http.StatusBadRequest)
 			return
 		}
-		if newUser.Age < 0 { // 年齢のバリデーションを0以上などに変更 (研修資料の20-80は例として)
+		if newUser.Age < 0 {
 			http.Error(w, "Age must be a positive value", http.StatusBadRequest)
 			return
 		}
-		// 必要であれば年齢の上限も設定
-		// if newUser.Age > 150 {
-		// 	http.Error(w, "Age is too high", http.StatusBadRequest)
-		// 	return
-		// }
 
-
-		// ULIDの生成
-		t := time.Now()
-		newId := ulid.Make(ulid.Timestamp(t), ulid.DefaultEntropy()).String()
-
+		// ULIDの生成 (修正箇所)
+		newId := ulid.Make().String()
 
 		tx, err := db.Begin()
 		if err != nil {
@@ -229,7 +221,7 @@ func closeDBWithSysCall() {
 		s := <-sig
 		log.Printf("received syscall, %v", s)
 
-		if db != nil { // dbがnilでないことを確認
+		if db != nil {
 			if err := db.Close(); err != nil {
 				log.Fatalf("fail: db.Close, %v\n", err)
 			}
