@@ -227,7 +227,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// データベースに挿入.
+		// データベースに挿入
 		_, err = tx.Exec("INSERT INTO user (id, name, age) VALUES (?, ?, ?)", newId, newUser.Name, newUser.Age)
 		if err != nil {
 			tx.Rollback() // エラー時はロールバック
