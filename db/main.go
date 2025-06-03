@@ -262,9 +262,11 @@ func main() {
 	// CORSミドルウェアの設定
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{
-			"http://localhost:3000",              // Reactアプリのローカル開発ポート (Create React Appのデフォルト)
-			"http://localhost:5173",              // Viteなどを使用している場合のローカル開発ポート
-			"https://deploycheck-gules.vercel.app", // ★あなたのVercelフロントエンドのURLに置き換える
+			"http://localhost:3000", // Reactアプリのローカル開発ポート (Create React Appのデフォルト)
+			"http://localhost:5173", // Viteなどを使用している場合のローカル開発ポート
+			"https://hackathon-frontend-ver.vercel.app", // あなたのVercel Production URL
+			"https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app", // Vercel Preview URL 1
+			"https://hackathon-frontend-ver-a0upvgnk-komeiall14s-projects.vercel.app", // Vercel Preview URL 2
 		},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, // 許可するHTTPメソッド
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},          // 許可するヘッダー (認証を実装する際にAuthorizationが必要になります)
