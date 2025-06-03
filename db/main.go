@@ -28,8 +28,6 @@ var db *sql.DB
 func init() {
 	log.Println("アプリケーション初期化処理を開始します...")
 
-	// 環境変数ファイル .env の読み込み (ローカル開発時)
-	// GOOGLE_CLOUD_PROJECT はCloud Run環境で自動的に設定されることが多い
 	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
 		log.Println(".env ファイルの読み込みを試みます...")
 		err := godotenv.Load()
@@ -42,11 +40,10 @@ func init() {
 		log.Println("Cloud Run環境を検出しました。.env ファイルは読み込みません。")
 	}
 
-	// 環境変数からMySQL接続情報を取得
 	mysqlUser := os.Getenv("MYSQL_USER")
 	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD")
 	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
-	mysqlHost := os.Getenv("MYSQL_HOST")
+	mysqlHost := os.Getenv("MYSQL_HOST") // Cloud Runでは /cloudsql/... 、ローカルではIP
 	mysqlPort := os.Getenv("MYSQL_PORT")
 
 	log.Printf("読み込まれた環境変数:\n  MYSQL_USER: %s\n  MYSQL_PASSWORD: [秘匿]\n  MYSQL_DATABASE: %s\n  MYSQL_HOST: %s\n  MYSQL_PORT: %s\n",
@@ -55,14 +52,14 @@ func init() {
 		log.Panicln("エラー: データベース接続に必要な環境変数 (MYSQL_USER, MYSQL_DATABASE, MYSQL_HOST) が設定されていません。")
 	}
 
-
 	var dsn string
-	if strings.HasPrefix(mysqlHost, "/") { // Unixソケットパス (Cloud Runなど)
+	// MYSQL_HOSTが /cloudsql/ で始まるか（Cloud SQL Unixソケットの典型的なパス）どうかでDSNを分岐
+	if strings.HasPrefix(mysqlHost, "/cloudsql/") {
 		dsn = fmt.Sprintf("%s:%s@unix(%s)/%s?parseTime=true", mysqlUser, mysqlUserPwd, mysqlHost, mysqlDatabase)
 		log.Printf("DSN (Unixソケット): %s\n", fmt.Sprintf("%s:[秘匿]@unix(%s)/%s?parseTime=true", mysqlUser, mysqlHost, mysqlDatabase))
 	} else { // TCP/IP接続 (ローカル開発など)
 		if mysqlPort == "" {
-			mysqlPort = "3308" // ローカルCloud SQL Proxy用デフォルト
+			mysqlPort = "3308"
 			log.Printf("MYSQL_PORTが未設定のため、デフォルトの %s を使用します。\n", mysqlPort)
 		}
 		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", mysqlUser, mysqlUserPwd, mysqlHost, mysqlPort, mysqlDatabase)
@@ -72,13 +69,12 @@ func init() {
 	log.Println("データベース接続を試みます...")
 	_db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		// sql.Openは実際には接続検証を行わないため、通常ここでのエラーは稀。DSNの形式不正など。
 		log.Panicf("致命的エラー: sql.Open に失敗しました。DSNが不正である可能性があります。エラー: %v\n", err)
 	}
 
 	log.Println("データベースへのPingを試みます...")
 	if err := _db.Ping(); err != nil {
-		log.Panicf("致命的エラー: _db.Ping に失敗しました。データベースへの接続を確認できません。エラー詳細: %v\nDSN: %s\n", err, dsn)
+		log.Panicf("致命的エラー: _db.Ping に失敗しました。データベースへの接続を確認できません。エラー詳細: %v\nDSN (ログ表示用マスク済): %s\n", err, dsn) // DSN表示をマスク済みに変更（本番ではDSN全部出さない方が良い）
 	}
 	db = _db
 	log.Println("✅ DB接続に成功しました。初期化処理を完了します。")
@@ -235,7 +231,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080" // Cloud Runのデフォルトは8080。ローカルテストも合わせる。
+		port = "8080"
 		log.Printf("環境変数 PORT が未設定のため、デフォルトの %s を使用します。\n", port)
 	}
 
@@ -256,7 +252,6 @@ func closeDBWithSysCall() {
 			log.Println("データベース接続をクローズします...")
 			if err := db.Close(); err != nil {
 				log.Printf("致命的エラー: db.Close に失敗しました。エラー: %v\n", err)
-				// ここで os.Exit(1) もあり得るが、Fatalf がその役割を果たす
 			}
 			log.Println("✅ データベース接続を正常にクローズしました。")
 		} else {
