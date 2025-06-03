@@ -15,6 +15,7 @@ import (
 	_ "github.com/go-sql-driver/mysql" // MySQLドライバ
 	"github.com/joho/godotenv"         // .envファイル読み込み用
 	"github.com/oklog/ulid/v2"         // ULID生成用
+	"github.com/rs/cors"  
 )
 
 // UserResForHTTPGet はHTTPレスポンス用のユーザー情報の構造体です。
@@ -98,23 +99,16 @@ func init() {
 }
 
 // handler関数はHTTPリクエストを処理します。
+// handler関数はHTTPリクエストを処理します。
 func handler(w http.ResponseWriter, r *http.Request) {
-	// CORSヘッダーの設定 (開発用。本番ではフロントエンドのオリジンを具体的に指定推奨)
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+    // 古い手動CORS設定とOPTIONSハンドリングは削除します。
+    // 代わりにmain関数でcorsミドルウェアが適用されます。
 
-	// プリフライトリクエスト(OPTIONS)への対応
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+    log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
 
-	log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
-
-	switch r.Method {
-	case http.MethodGet:
-		name := r.URL.Query().Get("name")
+    switch r.Method {
+    case http.MethodGet:
+    // ...以降はそのまま		name := r.URL.Query().Get("name")
 		if name != "" { // nameクエリパラメータがある場合は特定ユーザーを検索
 			log.Printf("特定ユーザー検索を開始します: name=%s\n", name)
 			rows, err := db.Query("SELECT id, name, age FROM user WHERE name = ?", name)
@@ -257,8 +251,30 @@ func handler(w http.ResponseWriter, r *http.Request) {
 // main関数はアプリケーションのエントリポイントです。
 func main() {
 	log.Println("main 関数を開始します...")
-	http.HandleFunc("/user", handler)
+
+	// カスタムのServeMuxを作成
+	// http.DefaultServeMux (nil) の代わりにこれを使用することで、CORSミドルウェアを適用しやすくなります。
+	mux := http.NewServeMux()         // ★この行を追加
+	mux.HandleFunc("/user", handler)  // ★この行に変更 (http.HandleFunc から mux.HandleFunc に)
 	log.Println("/user エンドポイントのハンドラを設定しました。")
+
+	// ★ここからCORSミドルウェアの設定を追加
+	// CORSミドルウェアの設定
+	c := cors.New(cors.Options{
+		AllowedOrigins: []string{
+			"http://localhost:3000",              // Reactアプリのローカル開発ポート (Create React Appのデフォルト)
+			"http://localhost:5173",              // Viteなどを使用している場合のローカル開発ポート
+			"https://deploycheck-gules.vercel.app", // ★あなたのVercelフロントエンドのURLに置き換える
+		},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, // 許可するHTTPメソッド
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},          // 許可するヘッダー (認証を実装する際にAuthorizationが必要になります)
+		AllowCredentials: true,                                               // クッキーや認証情報を送受信する場合にtrue
+		Debug:            true,                                               // デバッグログをコンソールに出力 (開発中はtrueで、本番デプロイ時はfalseに推奨)
+	})
+
+	// CORSミドルウェアをHTTPハンドラに適用
+	handlerWithCORS := c.Handler(mux) // ★この行を追加 (CORSが適用されたハンドラを作成)
+	// ★ここまでCORSミドルウェアの設定を追加
 
 	closeDBWithSysCall() // OSシグナルによるDBクローズ処理を設定
 	log.Println("システムコールによるDBクローズ処理を設定しました。")
@@ -271,8 +287,8 @@ func main() {
 	}
 
 	log.Printf("HTTPサーバーをポート %s で起動します...\n", port)
-	// サーバーを起動
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	// サーバーを起動し、CORSが適用されたハンドラを渡す
+	if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil { // ★ここを handlerWithCORS に変更
 		log.Fatalf("致命的エラー: ListenAndServe に失敗しました。ポート %s を使用できません。エラー: %v\n", port, err)
 	}
 }
