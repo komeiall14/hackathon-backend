@@ -266,7 +266,7 @@ func main() {
     // http.DefaultServeMux (nil) の代わりにこれを使用することで、CORSミドルウェアを適用しやすくなります。
     log.Println("DEBUG: Mux router creation point.") // ★追加するログ
     mux := http.NewServeMux()
-    mux.HandleFunc("/user", handlerWithCORS) // /user/パスにハンドラを割り当て
+    mux.HandleFunc("/user", handler) // /user/パスにハンドラを割り当て
     log.Println("/user エンドポイントのハンドラを設定しました。")
 
     // CORSミドルウェアの設定
@@ -303,7 +303,7 @@ func main() {
     log.Printf("DEBUG: About to call ListenAndServe. Port: %s", port) // ★追加するログ（ポート番号も確認）
 
     // サーバーを起動し、CORSが適用されたハンドラを渡す
-    if err := http.ListenAndServe(":"+port, handler); err != nil {
+    if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil {
         log.Fatalf("致命的エラー: ListenAndServe に失敗しました。ポート %s を使用できませんでした: %v", port, err)
     }
 }
