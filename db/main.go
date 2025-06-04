@@ -15,7 +15,7 @@ import (
 	_ "github.com/go-sql-driver/mysql" // MySQLドライバ
 	"github.com/joho/godotenv"         // .envファイル読み込み用
 	"github.com/oklog/ulid/v2"         // ULID生成用
-	"github.com/rs/cors"  
+	"github.com/rs/cors" // CORSミドルウェア
 )
 
 // UserResForHTTPGet はHTTPレスポンス用のユーザー情報の構造体です。
@@ -221,8 +221,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// test
-
 		// データベースに挿入
 		_, err = tx.Exec("INSERT INTO user (id, name, age) VALUES (?, ?, ?)", newId, newUser.Name, newUser.Age)
 		if err != nil {
@@ -243,16 +241,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated) // 201 Created
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
-	case http.MethodOptions:
-		// CORSのためのOPTIONSリクエストを処理
-		log.Println("CORSのためのOPTIONSリクエストを処理します...")
-		w.Header().Set("Access-Control-Allow-Origin", "https://hackathon-frontend-ver.vercel.app") // 必要に応じて特定のオリジンに変更
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.WriteHeader(http.StatusOK) // 200 OK
-		log.Println("OPTIONSリクエストに対するCORSヘッダを設定しました。")
-		return // OPTIONSリクエストはここで終了
+	// case http.MethodOptions:
+	// 	// CORSのためのOPTIONSリクエストを処理
+	// 	log.Println("CORSのためのOPTIONSリクエストを処理します...")
+	// 	w.Header().Set("Access-Control-Allow-Origin", "https://hackathon-frontend-ver.vercel.app") // 必要に応じて特定のオリジンに変更
+	// 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	// 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	// 	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	// 	w.WriteHeader(http.StatusOK) // 200 OK
+	// 	log.Println("OPTIONSリクエストに対するCORSヘッダを設定しました。")
+	// 	return // OPTIONSリクエストはここで終了
 	default:
 		log.Printf("メソッド不允许: HTTPメソッド %s は許可されていません。\n", r.Method)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
@@ -273,22 +271,22 @@ func main() {
 
     // CORSミドルウェアの設定
     log.Println("DEBUG: CORS middleware configuration point.") // ★追加するログ
-    // c := cors.New(cors.Options{
-    //     AllowedOrigins: []string{
-    //         "http://localhost:3000",
-    //         "http://localhost:5173",
-    //         "https://hackathon-frontend-ver.vercel.app",
-    //         "https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
-    //         "https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
-    //     },
-    //     AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-    //     AllowedHeaders:   []string{"Content-Type", "Authorization"},
-    //     AllowCredentials: true,
-    //     Debug:            true, // これがtrueであることを確認
-    // })
+    c := cors.New(cors.Options{
+        AllowedOrigins: []string{
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "https://hackathon-frontend-ver.vercel.app",
+            "https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
+            "https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
+        },
+        AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+        AllowedHeaders:   []string{"Content-Type", "Authorization"},
+        AllowCredentials: true,
+        Debug:            true, // これがtrueであることを確認
+    })
 
-    // // CORSミドルウェアをHTTPハンドラに適用
-    // handlerWithCORS := c.Handler(mux)
+    // CORSミドルウェアをHTTPハンドラに適用
+    handlerWithCORS := c.Handler(mux)
     log.Println("DEBUG: CORS middleware applied to handler.") // ★追加するログ
 
     closeDBWithSysCall()
