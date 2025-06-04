@@ -221,6 +221,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// test
+
 		// データベースに挿入
 		_, err = tx.Exec("INSERT INTO user (id, name, age) VALUES (?, ?, ?)", newId, newUser.Name, newUser.Age)
 		if err != nil {
