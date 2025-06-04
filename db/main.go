@@ -266,7 +266,7 @@ func main() {
     // http.DefaultServeMux (nil) の代わりにこれを使用することで、CORSミドルウェアを適用しやすくなります。
     log.Println("DEBUG: Mux router creation point.") // ★追加するログ
     mux := http.NewServeMux()
-    mux.HandleFunc("/user", handler) // /user/パスにハンドラを割り当て
+    mux.HandleFunc("/user", handlerWithCORS) // /user/パスにハンドラを割り当て
     log.Println("/user エンドポイントのハンドラを設定しました。")
 
     // CORSミドルウェアの設定
