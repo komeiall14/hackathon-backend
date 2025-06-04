@@ -250,15 +250,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 // main関数はアプリケーションのエントリポイントです。
 func main() {
-    log.Println("main 関数を開始します...") // このログが出ていることを確認
-    log.Println("DEBUG: Setting up HTTP router and CORS middleware...") // DEBUGログが出ていることを確認
+    log.Println("main 関数を開始します...")
+    log.Println("DEBUG: main function started successfully. Proceeding to setup router and CORS.") // ★追加するログ
 
     // カスタムのServeMuxを作成
+    // http.DefaultServeMux (nil) の代わりにこれを使用することで、CORSミドルウェアを適用しやすくなります。
+    log.Println("DEBUG: Mux router creation point.") // ★追加するログ
     mux := http.NewServeMux()
     mux.HandleFunc("/user", handler) // /user/パスにハンドラを割り当て
     log.Println("/user エンドポイントのハンドラを設定しました。")
 
-    // CORSミドルウェアの設定 (ここから下を再確認)
+    // CORSミドルウェアの設定
+    log.Println("DEBUG: CORS middleware configuration point.") // ★追加するログ
     c := cors.New(cors.Options{
         AllowedOrigins: []string{
             "http://localhost:3000",
@@ -274,21 +277,23 @@ func main() {
     })
 
     // CORSミドルウェアをHTTPハンドラに適用
-    handlerWithCORS := c.Handler(mux) // ここが重要
+    handlerWithCORS := c.Handler(mux)
+    log.Println("DEBUG: CORS middleware applied to handler.") // ★追加するログ
 
-    closeDBWithSysCall() // OSシグナルによるDBクローズ処理を設定
+    closeDBWithSysCall()
     log.Println("システムコールによるDBクローズ処理を設定しました。")
 
+    // Cloud Runから提供されるPORT環境変数を尊重する
     port := os.Getenv("PORT")
     if port == "" {
         port = "8080"
         log.Printf("環境変数 PORT が未設定のため、デフォルトの %s を使用します。\n", port)
     }
+
     log.Printf("HTTPサーバーをポート %s で起動します...\n", port)
-    log.Printf("DEBUG: Attempting to listen on port %s with CORS handler...", port) // DEBUGログが出ていることを確認
+    log.Printf("DEBUG: About to call ListenAndServe. Port: %s", port) // ★追加するログ（ポート番号も確認）
 
     // サーバーを起動し、CORSが適用されたハンドラを渡す
-    // ★★★ここが最も重要です。handlerWithCORS が渡されていることを確認★★★
     if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil {
         log.Fatalf("致命的エラー: ListenAndServe に失敗しました。ポート %s を使用できませんでした: %v", port, err)
     }
