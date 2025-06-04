@@ -271,22 +271,22 @@ func main() {
 
     // CORSミドルウェアの設定
     log.Println("DEBUG: CORS middleware configuration point.") // ★追加するログ
-    c := cors.New(cors.Options{
-        AllowedOrigins: []string{
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "https://hackathon-frontend-ver.vercel.app",
-            "https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
-            "https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
-        },
-        AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-        AllowedHeaders:   []string{"Content-Type", "Authorization"},
-        AllowCredentials: true,
-        Debug:            true, // これがtrueであることを確認
-    })
+    // c := cors.New(cors.Options{
+    //     AllowedOrigins: []string{
+    //         "http://localhost:3000",
+    //         "http://localhost:5173",
+    //         "https://hackathon-frontend-ver.vercel.app",
+    //         "https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
+    //         "https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
+    //     },
+    //     AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+    //     AllowedHeaders:   []string{"Content-Type", "Authorization"},
+    //     AllowCredentials: true,
+    //     Debug:            true, // これがtrueであることを確認
+    // })
 
-    // CORSミドルウェアをHTTPハンドラに適用
-    handlerWithCORS := c.Handler(mux)
+    // // CORSミドルウェアをHTTPハンドラに適用
+    // handlerWithCORS := c.Handler(mux)
     log.Println("DEBUG: CORS middleware applied to handler.") // ★追加するログ
 
     closeDBWithSysCall()
@@ -303,7 +303,7 @@ func main() {
     log.Printf("DEBUG: About to call ListenAndServe. Port: %s", port) // ★追加するログ（ポート番号も確認）
 
     // サーバーを起動し、CORSが適用されたハンドラを渡す
-    if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil {
+    if err := http.ListenAndServe(":"+port, handler); err != nil {
         log.Fatalf("致命的エラー: ListenAndServe に失敗しました。ポート %s を使用できませんでした: %v", port, err)
     }
 }
