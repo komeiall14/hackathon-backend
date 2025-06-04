@@ -241,7 +241,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated) // 201 Created
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
-
+	case http.MethodOptions:
+		// CORSのためのOPTIONSリクエストを処理
+		log.Println("CORSのためのOPTIONSリクエストを処理します...")
+		w.Header().Set("Access-Control-Allow-Origin", "https://hackathon-frontend-ver.vercel.app") // 必要に応じて特定のオリジンに変更
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.WriteHeader(http.StatusOK) // 200 OK
+		log.Println("OPTIONSリクエストに対するCORSヘッダを設定しました。")
+		return // OPTIONSリクエストはここで終了
 	default:
 		log.Printf("メソッド不允许: HTTPメソッド %s は許可されていません。\n", r.Method)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
