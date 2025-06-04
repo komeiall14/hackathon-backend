@@ -108,7 +108,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
     switch r.Method {
     case http.MethodGet:
-    // ...以降はそのまま		name := r.URL.Query().Get("name")
+    	name := r.URL.Query().Get("name")
 		if name != "" { // nameクエリパラメータがある場合は特定ユーザーを検索
 			log.Printf("特定ユーザー検索を開始します: name=%s\n", name)
 			rows, err := db.Query("SELECT id, name, age FROM user WHERE name = ?", name)
