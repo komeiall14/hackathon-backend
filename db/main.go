@@ -241,16 +241,58 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated) // 201 Created
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
-	// case http.MethodOptions:
-	// 	// CORSのためのOPTIONSリクエストを処理
-	// 	log.Println("CORSのためのOPTIONSリクエストを処理します...")
-	// 	w.Header().Set("Access-Control-Allow-Origin", "https://hackathon-frontend-ver.vercel.app") // 必要に応じて特定のオリジンに変更
-	// 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	// 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	// 	w.Header().Set("Access-Control-Allow-Credentials", "true")
-	// 	w.WriteHeader(http.StatusOK) // 200 OK
-	// 	log.Println("OPTIONSリクエストに対するCORSヘッダを設定しました。")
-	// 	return // OPTIONSリクエストはここで終了
+		
+	case http.MethodDelete: // DELETEメソッドのハンドリングを追加
+        log.Println("ユーザー削除処理を開始します...")
+
+        // IDをクエリパラメータから取得 (例: /user?id=01JWT...)
+        userId := r.URL.Query().Get("id")
+        if userId == "" {
+            log.Println("エラー: ユーザーIDがクエリパラメータに指定されていません。")
+            http.Error(w, "User ID is required as query parameter (e.g., /user?id={id})", http.StatusBadRequest)
+            return
+        }
+
+        log.Printf("ユーザー削除リクエスト: ID=%s\n", userId)
+
+        tx, err := db.Begin() // トランザクションを開始
+        if err != nil {
+            log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました。エラー: %v\n", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+
+        result, err := tx.Exec("DELETE FROM user WHERE id = ?", userId)
+        if err != nil {
+            tx.Rollback() // エラー時はロールバック
+            log.Printf("エラー: tx.Exec (DELETE) に失敗しました。エラー: %v\n", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+
+        rowsAffected, err := result.RowsAffected()
+        if err != nil {
+            tx.Rollback()
+            log.Printf("エラー: RowsAffected() に失敗しました。エラー: %v\n", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+
+        if rowsAffected == 0 {
+            tx.Rollback()
+            log.Printf("エラー: ユーザーID=%s が見つかりませんでした。\n", userId)
+            http.Error(w, "User not found", http.StatusNotFound) // 404 Not Found
+            return
+        }
+
+        if err := tx.Commit(); err != nil { // トランザクションをコミット
+            log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました。エラー: %v\n", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+
+        log.Printf("ユーザーID=%s を正常に削除しました。\n", userId)
+        w.WriteHeader(http.StatusNoContent) // 204 No Content (成功、コンテンツなし)
 	default:
 		log.Printf("メソッド不允许: HTTPメソッド %s は許可されていません。\n", r.Method)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
