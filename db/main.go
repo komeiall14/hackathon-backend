@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,9 +14,11 @@ import (
 	// "time" // ulid.Make() が引数を取らないバージョンでは直接は不要
 
 	_ "github.com/go-sql-driver/mysql" // MySQLドライバ
+	"github.com/google/generative-ai-go/genai"
 	"github.com/joho/godotenv"         // .envファイル読み込み用
 	"github.com/oklog/ulid/v2"         // ULID生成用
 	"github.com/rs/cors" // CORSミドルウェア
+	"google.golang.org/api/option"
 )
 
 // UserResForHTTPGet はHTTPレスポンス用のユーザー情報の構造体です。
@@ -24,6 +27,17 @@ type UserResForHTTPGet struct {
 	Name string `json:"name"`
 	Age  int    `json:"age"`
 }
+// Post は投稿データの構造体です。
+type Post struct {
+	PostID    string `json:"post_id"`
+	UserID    string `json:"user_id"`
+	UserName  string `json:"user_name"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+	LikeCount     int    `json:"like_count"`     
+    IsLikedByMe   bool   `json:"is_liked_by_me"`  
+	ReplyCount    int    `json:"reply_count"` 
+}
 
 var db *sql.DB // グローバルなデータベース接続プール
 
@@ -31,8 +45,8 @@ var db *sql.DB // グローバルなデータベース接続プール
 func init() {
 	log.Println("アプリケーション初期化処理を開始します...")
 
-	// Cloud Run環境でない場合（ローカル開発時など）は .env ファイルから環境変数を読み込む
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" { // GOOGLE_CLOUD_PROJECTはCloud Runで通常設定される環境変数
+	// (init関数の内容は変更なしのため省略)
+	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" { 
 		log.Println(".env ファイルの読み込みを試みます...")
 		err := godotenv.Load()
 		if err != nil {
@@ -44,34 +58,30 @@ func init() {
 		log.Println("Cloud Run環境を検出しました。.env ファイルは読み込みません。")
 	}
 
-	// 環境変数からMySQL接続情報を取得
 	mysqlUser := os.Getenv("MYSQL_USER")
-	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD") // Cloud RunではMYSQL_PASSWORD, ローカルでは.envで設定
+	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD") 
 	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
-	mysqlHost := os.Getenv("MYSQL_HOST")         // Cloud Runでは /cloudsql/... のソケットパス, ローカルではIPアドレス
-	mysqlPort := os.Getenv("MYSQL_PORT")         // ローカル開発時(Cloud SQL Proxy用)に主に設定
+	mysqlHost := os.Getenv("MYSQL_HOST")         
+	mysqlPort := os.Getenv("MYSQL_PORT")         
 
-	// 取得した環境変数の値をログに出力（パスワードはマスク）
 	log.Printf("読み込まれた環境変数:\n  MYSQL_USER: %s\n  MYSQL_PASSWORD: [設定済みか確認してください]\n  MYSQL_DATABASE: %s\n  MYSQL_HOST: %s\n  MYSQL_PORT: %s\n",
 		mysqlUser, mysqlDatabase, mysqlHost, mysqlPort)
 
-	// 必須環境変数のチェック
 	if mysqlUser == "" || mysqlDatabase == "" || mysqlHost == "" {
 		log.Panicln("エラー: データベース接続に必要な環境変数 (MYSQL_USER, MYSQL_DATABASE, MYSQL_HOST) が設定されていません。")
 	}
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" && mysqlUserPwd == "" { // Cloud Run環境ではパスワードも必須
+	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" && mysqlUserPwd == "" { 
 		log.Panicln("エラー: Cloud Run環境でMYSQL_PASSWORDが設定されていません。")
 	}
 
 
 	var dsn string
-	// MYSQL_HOSTが /cloudsql/ で始まるか（Cloud SQL Unixソケットの典型的なパス）どうかでDSNを分岐
-	if strings.HasPrefix(mysqlHost, "/cloudsql/") { // Cloud RunなどでのUnixソケット接続
+	if strings.HasPrefix(mysqlHost, "/cloudsql/") { 
 		dsn = fmt.Sprintf("%s:%s@unix(%s)/%s?parseTime=true", mysqlUser, mysqlUserPwd, mysqlHost, mysqlDatabase)
 		log.Printf("DSN (Unixソケット): %s\n", fmt.Sprintf("%s:[秘匿]@unix(%s)/%s?parseTime=true", mysqlUser, mysqlHost, mysqlDatabase))
-	} else { // TCP/IP接続 (ローカル開発など)
+	} else { 
 		if mysqlPort == "" {
-			mysqlPort = "3308" // ローカルCloud SQL Proxy用デフォルトポート
+			mysqlPort = "3308" 
 			log.Printf("MYSQL_PORTが未設定のため、デフォルトの %s を使用します。\n", mysqlPort)
 		}
 		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", mysqlUser, mysqlUserPwd, mysqlHost, mysqlPort, mysqlDatabase)
@@ -81,35 +91,30 @@ func init() {
 	log.Println("データベース接続を試みます (sql.Open)...")
 	_db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		// sql.Openは実際には接続検証を行わないため、通常ここでのエラーは稀。DSNの形式不正など。
 		log.Panicf("致命的エラー: sql.Open に失敗しました。DSNが不正である可能性があります。エラー: %v\n", err)
 	}
 
 	log.Println("データベースへのPingを試みます...")
 	if err := _db.Ping(); err != nil {
-		// Pingで実際の接続を検証
-		maskedDsn := dsn // 実際のDSNをそのままログに出すのはセキュリティリスクがあるため、必要に応じてマスク処理
+		maskedDsn := dsn 
 		if mysqlUserPwd != "" {
 			maskedDsn = strings.Replace(dsn, mysqlUserPwd, "[PASSWORD_MASKED]", 1)
 		}
 		log.Panicf("致命的エラー: _db.Ping に失敗しました。データベースへの接続を確認できません。\n  エラー詳細: %v\n  DSN (マスク済): %s\n", err, maskedDsn)
 	}
-	db = _db // グローバル変数に代入
+	db = _db 
 	log.Println("✅ DB接続に成功しました。初期化処理を完了します。")
 }
 
 // handler関数はHTTPリクエストを処理します。
-// handler関数はHTTPリクエストを処理します。
 func handler(w http.ResponseWriter, r *http.Request) {
-    // 古い手動CORS設定とOPTIONSハンドリングは削除します。
-    // 代わりにmain関数でcorsミドルウェアが適用されます。
-
-    log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
+    // (handler関数の内容は変更なしのため省略)
+	log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
 
     switch r.Method {
     case http.MethodGet:
     	name := r.URL.Query().Get("name")
-		if name != "" { // nameクエリパラメータがある場合は特定ユーザーを検索
+		if name != "" { 
 			log.Printf("特定ユーザー検索を開始します: name=%s\n", name)
 			rows, err := db.Query("SELECT id, name, age FROM user WHERE name = ?", name)
 			if err != nil {
@@ -129,7 +134,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				users = append(users, u)
 			}
-			if err := rows.Err(); err != nil { // ループ中のエラーを確認
+			if err := rows.Err(); err != nil { 
 				log.Printf("エラー: rows.Err (特定ユーザー検索) でエラーが発生しました。エラー: %v\n", err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
@@ -147,7 +152,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// nameクエリパラメータがない場合は全ユーザーを取得
 		log.Println("全ユーザー検索を開始します...")
 		rows, err := db.Query("SELECT id, name, age FROM user")
 		if err != nil {
@@ -167,7 +171,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			}
 			users = append(users, u)
 		}
-		if err := rows.Err(); err != nil { // ループ中のエラーを確認
+		if err := rows.Err(); err != nil { 
 			log.Printf("エラー: rows.Err (all users) でエラーが発生しました。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
@@ -192,7 +196,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// バリデーション
 		if newUser.Name == "" {
 			log.Println("バリデーションエラー: Name が空です。")
 			http.Error(w, "Name is empty", http.StatusBadRequest)
@@ -203,17 +206,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Name is too long (max 50 characters)", http.StatusBadRequest)
 			return
 		}
-		if newUser.Age < 0 { // 年齢は0歳以上とする (要件に応じて変更)
+		if newUser.Age < 0 { 
 			log.Printf("バリデーションエラー: Age が負の値です。入力値: %d\n", newUser.Age)
 			http.Error(w, "Age must be a non-negative value", http.StatusBadRequest)
 			return
 		}
 
-		// ULIDの生成
 		newId := ulid.Make().String()
 		log.Printf("新規ユーザーID (ULID) を生成しました: %s\n", newId)
 
-		// トランザクションを開始
 		tx, err := db.Begin()
 		if err != nil {
 			log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました。エラー: %v\n", err)
@@ -221,16 +222,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// データベースに挿入
 		_, err = tx.Exec("INSERT INTO user (id, name, age) VALUES (?, ?, ?)", newId, newUser.Name, newUser.Age)
 		if err != nil {
-			tx.Rollback() // エラー時はロールバック
+			tx.Rollback() 
 			log.Printf("エラー: tx.Exec (INSERT) に失敗しました。トランザクションをロールバックします。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 
-		// トランザクションをコミット
 		if err := tx.Commit(); err != nil {
 			log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -239,13 +238,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("ユーザー作成成功: ID=%s, Name=%s, Age=%d\n", newId, newUser.Name, newUser.Age)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated) // 201 Created
+		w.WriteHeader(http.StatusCreated) 
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
-		
-	case http.MethodDelete: // DELETEメソッドのハンドリングを追加
+
+	case http.MethodDelete: 
         log.Println("ユーザー削除処理を開始します...")
 
-        // IDをクエリパラメータから取得 (例: /user?id=01JWT...)
         userId := r.URL.Query().Get("id")
         if userId == "" {
             log.Println("エラー: ユーザーIDがクエリパラメータに指定されていません。")
@@ -255,7 +253,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
         log.Printf("ユーザー削除リクエスト: ID=%s\n", userId)
 
-        tx, err := db.Begin() // トランザクションを開始
+        tx, err := db.Begin() 
         if err != nil {
             log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました。エラー: %v\n", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -264,7 +262,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
         result, err := tx.Exec("DELETE FROM user WHERE id = ?", userId)
         if err != nil {
-            tx.Rollback() // エラー時はロールバック
+            tx.Rollback() 
             log.Printf("エラー: tx.Exec (DELETE) に失敗しました。エラー: %v\n", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
             return
@@ -281,38 +279,425 @@ func handler(w http.ResponseWriter, r *http.Request) {
         if rowsAffected == 0 {
             tx.Rollback()
             log.Printf("エラー: ユーザーID=%s が見つかりませんでした。\n", userId)
-            http.Error(w, "User not found", http.StatusNotFound) // 404 Not Found
+            http.Error(w, "User not found", http.StatusNotFound) 
             return
         }
 
-        if err := tx.Commit(); err != nil { // トランザクションをコミット
+        if err := tx.Commit(); err != nil { 
             log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました。エラー: %v\n", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
             return
         }
 
         log.Printf("ユーザーID=%s を正常に削除しました。\n", userId)
-        w.WriteHeader(http.StatusNoContent) // 204 No Content (成功、コンテンツなし)
+        w.WriteHeader(http.StatusNoContent) 
 	default:
 		log.Printf("メソッド不允许: HTTPメソッド %s は許可されていません。\n", r.Method)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 	}
 }
 
+
+// postsGetHandler はトップレベルの投稿を、いいね数やリプライ数と共に取得してJSONで返します。
+func postsGetHandler(w http.ResponseWriter, r *http.Request) {
+	// (postsGetHandler関数の内容は変更なしのため省略)
+	if r.Method != http.MethodGet {
+        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
+
+    currentUserID := "test-user-123" 
+
+    query := `
+        SELECT
+            p.post_id, p.user_id, p.user_name, p.content, p.created_at,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+        FROM
+            posts p
+        WHERE
+            p.parent_post_id IS NULL
+        ORDER BY
+            p.created_at DESC
+    `
+
+    rows, err := db.Query(query, currentUserID)
+    if err != nil {
+        log.Printf("エラー: db.Query (all top-level posts) に失敗しました: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    var posts []Post
+    for rows.Next() {
+        var p Post
+        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+            log.Printf("エラー: rows.Scan (all top-level posts) に失敗しました: %v", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+        posts = append(posts, p)
+    }
+
+    bytes, err := json.Marshal(posts)
+    if err != nil {
+        log.Printf("エラー: json.Marshal (all top-level posts) に失敗しました: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.Write(bytes)
+    log.Println("トップレベルの投稿（いいね・リプライ数付き）の取得リクエスト成功")
+}
+// postCreateHandler は新しい投稿を作成します。
+func postCreateHandler(w http.ResponseWriter, r *http.Request) {
+	// (postCreateHandler関数の内容は変更なしのため省略)
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var requestBody struct {
+		Content  string `json:"content"`
+		UserID   string `json:"user_id"`   
+		UserName string `json:"user_name"` 
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		log.Printf("エラー: リクエストボディのデコードに失敗しました: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if requestBody.Content == "" {
+		log.Println("バリデーションエラー: 投稿内容(content)が空です。")
+		http.Error(w, "投稿内容が空です", http.StatusBadRequest)
+		return
+	}
+
+	postID := ulid.Make().String()
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec("INSERT INTO posts (post_id, user_id, user_name, content) VALUES (?, ?, ?, ?)",
+		postID,
+		requestBody.UserID,
+		requestBody.UserName,
+		requestBody.Content)
+
+	if err != nil {
+		tx.Rollback() 
+		log.Printf("エラー: db.Exec (insert post) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated) 
+	log.Printf("投稿作成成功: post_id=%s\n", postID)
+	json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
+}
+
+// ★★★ 投稿を削除するハンドラ関数をここに追加 ★★★
+func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "DELETEメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// パスから投稿IDを取得 (例: /api/posts/delete/{postID})
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 || pathSegments[4] == "" { // ID部分が空でないかチェック
+		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	postID := pathSegments[4]
+
+	log.Printf("投稿削除リクエストを受信: post_id=%s", postID)
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("エラー: db.Begin (トランザクション開始) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	// 投稿を削除する (もしリプライなども同時に削除したい場合は、ここに追加のDELETE文を書く)
+	result, err := tx.Exec("DELETE FROM posts WHERE post_id = ?", postID)
+	if err != nil {
+		tx.Rollback()
+		log.Printf("エラー: tx.Exec (delete post) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		log.Printf("エラー: result.RowsAffected に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	if rowsAffected == 0 {
+		tx.Rollback()
+		log.Printf("削除対象の投稿が見つかりませんでした: post_id=%s", postID)
+		http.Error(w, "投稿が見つかりません", http.StatusNotFound)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("エラー: tx.Commit に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("投稿削除成功: post_id=%s", postID)
+	w.WriteHeader(http.StatusNoContent) // 成功時は 204 No Content を返す
+}
+
+
+// likeHandler はいいねの作成と削除を処理します
+func likeHandler(w http.ResponseWriter, r *http.Request) {
+    // (likeHandler関数の内容は変更なしのため省略)
+	pathSegments := strings.Split(r.URL.Path, "/")
+    if len(pathSegments) < 5 { 
+        http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+        return
+    }
+    postID := pathSegments[4]
+
+    userID := "test-user-123" 
+
+    switch r.Method {
+    case http.MethodPost: 
+        likeID := ulid.Make().String()
+        _, err := db.Exec("INSERT INTO likes (like_id, user_id, post_id) VALUES (?, ?, ?)", likeID, userID, postID)
+        if err != nil {
+            log.Printf("エラー: db.Exec (insert like) に失敗しました: %v", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+        w.WriteHeader(http.StatusCreated)
+        log.Printf("いいね成功: user_id=%s, post_id=%s", userID, postID)
+
+    case http.MethodDelete: 
+        _, err := db.Exec("DELETE FROM likes WHERE user_id = ? AND post_id = ?", userID, postID)
+        if err != nil {
+            log.Printf("エラー: db.Exec (delete like) に失敗しました: %v", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+        w.WriteHeader(http.StatusNoContent)
+        log.Printf("いいね取り消し成功: user_id=%s, post_id=%s", userID, postID)
+
+    default:
+        http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+    }
+}
+
+// replyCreateHandlerは特定の投稿への新しいリプライを作成します
+func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
+	// (replyCreateHandler関数の内容は変更なしのため省略)
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 { 
+		http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
+		return
+	}
+	parentPostID := pathSegments[4] 
+
+	var requestBody struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if requestBody.Content == "" {
+		http.Error(w, "リプライ内容が空です", http.StatusBadRequest)
+		return
+	}
+
+	userID := "test-user-123" 
+	userName := "テストリプライユーザー"
+
+	replyID := ulid.Make().String()
+
+	_, err := db.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, content, parent_post_id) VALUES (?, ?, ?, ?, ?)",
+		replyID,
+		userID,
+		userName,
+		requestBody.Content,
+		parentPostID, 
+	)
+	if err != nil {
+		log.Printf("エラー: db.Exec (insert reply) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s", replyID, parentPostID)
+	json.NewEncoder(w).Encode(map[string]string{"reply_id": replyID})
+}
+
+// repliesGetHandler はリプライの一覧を取得します
+func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
+	// (repliesGetHandler関数の内容は変更なしのため省略)
+	if r.Method != http.MethodGet {
+		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 {
+		http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
+		return
+	}
+	parentPostID := pathSegments[4]
+	currentUserID := "test-user-123" 
+
+	query := `
+		SELECT
+			p.post_id, p.user_id, p.user_name, p.content, p.created_at,
+			(SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+			EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+		FROM posts p
+		WHERE p.parent_post_id = ?
+		ORDER BY p.created_at ASC
+	`
+
+	rows, err := db.Query(query, currentUserID, parentPostID)
+	if err != nil {
+		log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var replies []Post
+	for rows.Next() {
+		var p Post
+		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+			log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		replies = append(replies, p)
+	}
+
+	bytes, err := json.Marshal(replies)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (replies) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
+	log.Printf("リプライ一覧の取得リクエスト成功: parent_id=%s", parentPostID)
+}
+
+func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
+	// (geminiSuggestReplyHandler関数の内容は変更なしのため省略)
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var requestBody struct {
+		OriginalPostContent string `json:"original_post_content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if requestBody.OriginalPostContent == "" {
+		http.Error(w, "元の投稿内容が空です", http.StatusBadRequest)
+		return
+	}
+
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		log.Println("エラー: GEMINI_API_KEY が設定されていません")
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	ctx := context.Background()
+	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	if err != nil {
+		log.Printf("エラー: Geminiクライアントの作成に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer client.Close()
+
+	model := client.GenerativeModel("gemini-1.5-flash")
+	prompt := fmt.Sprintf("以下のSNS投稿に対して、ポジティブで、少し気の利いた短い返信を1つだけ生成してください。絵文字を少しだけ使って、フレンドリーな雰囲気でお願いします。返信は日本語で、返信文だけを出力してください。\n\n投稿:「%s」", requestBody.OriginalPostContent)
+
+	log.Printf("Geminiに送信するプロンプト: %s\n", prompt)
+
+	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	if err != nil {
+		log.Printf("エラー: Gemini APIからのコンテンツ生成に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+		suggestion := resp.Candidates[0].Content.Parts[0]
+		log.Printf("Geminiからの返信提案: %s\n", suggestion)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"suggestion": suggestion})
+	} else {
+		log.Println("エラー: Geminiから返信候補が生成されませんでした。")
+		http.Error(w, "返信を生成できませんでした", http.StatusInternalServerError)
+	}
+}
+
 // main関数はアプリケーションのエントリポイントです。
 func main() {
     log.Println("main 関数を開始します...")
-    log.Println("DEBUG: main function started successfully. Proceeding to setup router and CORS.") // ★追加するログ
+    log.Println("DEBUG: main function started successfully. Proceeding to setup router and CORS.")
 
-    // カスタムのServeMuxを作成
-    // http.DefaultServeMux (nil) の代わりにこれを使用することで、CORSミドルウェアを適用しやすくなります。
-    log.Println("DEBUG: Mux router creation point.") // ★追加するログ
     mux := http.NewServeMux()
-    mux.HandleFunc("/user", handler) // /user/パスにハンドラを割り当て
+    mux.HandleFunc("/user", handler)
     log.Println("/user エンドポイントのハンドラを設定しました。")
 
-    // CORSミドルウェアの設定
-    log.Println("DEBUG: CORS middleware configuration point.") // ★追加するログ
+	mux.HandleFunc("/posts", postsGetHandler)
+	mux.HandleFunc("/post", postCreateHandler)
+    mux.HandleFunc("/api/posts/like/", likeHandler)
+    mux.HandleFunc("/api/posts/reply/", replyCreateHandler)
+	mux.HandleFunc("/api/posts/replies/", repliesGetHandler)
+	mux.HandleFunc("/api/posts/suggest-reply", geminiSuggestReplyHandler)
+	
+	// ★★★ 投稿削除用のエンドポイントをここに追加 ★★★
+	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
+
+
+    log.Println("DEBUG: CORS middleware configuration point.") 
     c := cors.New(cors.Options{
         AllowedOrigins: []string{
             "http://localhost:3000",
@@ -324,17 +709,15 @@ func main() {
         AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
         AllowedHeaders:   []string{"Content-Type", "Authorization"},
         AllowCredentials: true,
-        Debug:            true, // これがtrueであることを確認
+        Debug:            true,
     })
 
-    // CORSミドルウェアをHTTPハンドラに適用
     handlerWithCORS := c.Handler(mux)
-    log.Println("DEBUG: CORS middleware applied to handler.") // ★追加するログ
+    log.Println("DEBUG: CORS middleware applied to handler.")
 
     closeDBWithSysCall()
     log.Println("システムコールによるDBクローズ処理を設定しました。")
 
-    // Cloud Runから提供されるPORT環境変数を尊重する
     port := os.Getenv("PORT")
     if port == "" {
         port = "8080"
@@ -342,9 +725,8 @@ func main() {
     }
 
     log.Printf("HTTPサーバーをポート %s で起動します...\n", port)
-    log.Printf("DEBUG: About to call ListenAndServe. Port: %s", port) // ★追加するログ（ポート番号も確認）
+    log.Printf("DEBUG: About to call ListenAndServe. Port: %s", port)
 
-    // サーバーを起動し、CORSが適用されたハンドラを渡す
     if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil {
         log.Fatalf("致命的エラー: ListenAndServe に失敗しました。ポート %s を使用できませんでした: %v", port, err)
     }
@@ -352,23 +734,23 @@ func main() {
 
 // closeDBWithSysCall関数はOSのシグナル(SIGTERM, SIGINT)を補足し、DB接続を安全にクローズします。
 func closeDBWithSysCall() {
+	// (closeDBWithSysCall関数の内容は変更なしのため省略)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		s := <-sig
 		log.Printf("システムコールを受信しました: %v。シャットダウン処理を開始します。\n", s)
 
-		if db != nil { // dbが初期化されていればクローズ処理を行う
+		if db != nil { 
 			log.Println("データベース接続をクローズします...")
 			if err := db.Close(); err != nil {
 				log.Printf("致命的エラー: db.Close に失敗しました。エラー: %v\n", err)
-				// ここで os.Exit(1) などで終了させることも検討できる
 			}
 			log.Println("✅ データベース接続を正常にクローズしました。")
 		} else {
 			log.Println("データベース接続(db)がnilのため、クローズ処理はスキップされました。")
 		}
 		log.Println("アプリケーションを終了します。")
-		os.Exit(0) // プログラムを正常終了させる
+		os.Exit(0) 
 	}()
 }
