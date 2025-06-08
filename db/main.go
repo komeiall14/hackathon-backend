@@ -705,6 +705,7 @@ func main() {
             "https://hackathon-frontend-ver.vercel.app",
             "https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
             "https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
+			"https://hackathon-frontend-1pis2eltq-komeiall14s-projects.vercel.app",
         },
         AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
         AllowedHeaders:   []string{"Content-Type", "Authorization"},
