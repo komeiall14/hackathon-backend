@@ -354,61 +354,91 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 }
 // postCreateHandler は新しい投稿を作成します。
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
-	// (postCreateHandler関数の内容は変更なしのため省略)
-	if r.Method != http.MethodPost {
-		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
-		return
-	}
+    if r.Method != http.MethodPost {
+        http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
 
-	var requestBody struct {
-		Content  string `json:"content"`
-		UserID   string `json:"user_id"`   
-		UserName string `json:"user_name"` 
-	}
+    var requestBody struct {
+        Content  string `json:"content"`
+        UserID   string `json:"user_id"`   // これはFirebaseのUID
+        UserName string `json:"user_name"` 
+    }
 
-	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-		log.Printf("エラー: リクエストボディのデコードに失敗しました: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
+    if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+        log.Printf("エラー: リクエストボディのデコードに失敗しました: %v", err)
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
 
-	if requestBody.Content == "" {
-		log.Println("バリデーションエラー: 投稿内容(content)が空です。")
-		http.Error(w, "投稿内容が空です", http.StatusBadRequest)
-		return
-	}
+    if requestBody.Content == "" {
+        log.Println("バリデーションエラー: 投稿内容(content)が空です。")
+        http.Error(w, "投稿内容が空です", http.StatusBadRequest)
+        return
+    }
 
-	postID := ulid.Make().String()
+    // トランザクションを開始
+    tx, err := db.Begin()
+    if err != nil {
+        log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+    // deferを使って、エラー時に必ずロールバックするようにする
+    defer tx.Rollback()
 
-	tx, err := db.Begin()
-	if err != nil {
-		log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
+    // 1. Firebase UIDを元に、userテーブルにユーザーが存在するか確認
+    var userTableID string
+    err = tx.QueryRow("SELECT id FROM user WHERE firebase_uid = ?", requestBody.UserID).Scan(&userTableID)
 
-	_, err = tx.Exec("INSERT INTO posts (post_id, user_id, user_name, content) VALUES (?, ?, ?, ?)",
-		postID,
-		requestBody.UserID,
-		requestBody.UserName,
-		requestBody.Content)
+    // 2. もしユーザーが存在しない場合(sql.ErrNoRows)、新しく作成する
+    if err == sql.ErrNoRows {
+        log.Printf("ユーザーがDBに存在しないため、新規作成します: firebase_uid=%s", requestBody.UserID)
+        newULID := ulid.Make().String() // MySQLのuserテーブル用の新しいID
+        // ageカラムはFirebaseからは直接取得できないため、ここでは登録せずNULLのままにします
+        _, insertErr := tx.Exec(
+            "INSERT INTO user (id, name, firebase_uid) VALUES (?, ?, ?)", 
+            newULID, 
+            requestBody.UserName, 
+            requestBody.UserID,
+        )
+        if insertErr != nil {
+            log.Printf("エラー: userテーブルへのINSERTに失敗: %v", insertErr)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+        log.Printf("ユーザー作成成功: id=%s, firebase_uid=%s", newULID, requestBody.UserID)
+    } else if err != nil {
+        // その他のDBエラー
+        log.Printf("エラー: ユーザーの存在確認クエリに失敗: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
 
-	if err != nil {
-		tx.Rollback() 
-		log.Printf("エラー: db.Exec (insert post) に失敗しました: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
+    // 3. 投稿を作成する（元のロジック）
+    postID := ulid.Make().String()
+    _, err = tx.Exec("INSERT INTO posts (post_id, user_id, user_name, content) VALUES (?, ?, ?, ?)",
+        postID,
+        requestBody.UserID, // postsテーブルのuser_idには引き続きFirebaseのUIDを入れる
+        requestBody.UserName,
+        requestBody.Content)
 
-	if err := tx.Commit(); err != nil {
-		log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
+    if err != nil {
+        log.Printf("エラー: postsテーブルへのINSERTに失敗: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
 
-	w.WriteHeader(http.StatusCreated) 
-	log.Printf("投稿作成成功: post_id=%s\n", postID)
-	json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
+    // 全ての処理が成功したら、トランザクションをコミット
+    if err := tx.Commit(); err != nil {
+        log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+
+    w.WriteHeader(http.StatusCreated) 
+    log.Printf("投稿作成成功: post_id=%s\n", postID)
+    json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
 }
 
 // ★★★ 投稿を削除するハンドラ関数をここに追加 ★★★
