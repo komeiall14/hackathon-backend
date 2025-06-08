@@ -330,7 +330,7 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     }
     defer rows.Close()
 
-    var posts []Post
+    posts := make([]Post, 0)
     for rows.Next() {
         var p Post
         if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
@@ -596,7 +596,7 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var replies []Post
+	replies := make([]Post, 0)
 	for rows.Next() {
 		var p Post
 		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
