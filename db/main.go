@@ -755,9 +755,8 @@ func main() {
 	mux.HandleFunc("/api/posts/replies/", repliesGetHandler)
 	mux.HandleFunc("/api/posts/suggest-reply", geminiSuggestReplyHandler)
 	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
+	mux.HandleFunc("/api/users/", userPostsHandler)
 	
-	// ★★★ 投稿削除用のエンドポイントをここに追加 ★★★
-	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
 
 
     log.Println("DEBUG: CORS middleware configuration point.") 
