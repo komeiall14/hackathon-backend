@@ -677,6 +677,68 @@ func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// userPostsHandlerは特定のユーザーの投稿一覧を取得します
+func userPostsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// URLパスからユーザーIDを取得 (例: /api/users/ここにIDが入る/)
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 4 || pathSegments[3] == "" {
+		http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	userID := pathSegments[3]
+
+	log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", userID)
+
+	// ログイン中のユーザーID（いいね判定用、今回は仮）
+	currentUserID := "test-user-123"
+
+	query := `
+		SELECT
+			p.post_id, p.user_id, p.user_name, p.content, p.created_at,
+			(SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+			EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+		FROM posts p
+		WHERE p.user_id = ? AND p.parent_post_id IS NULL
+		ORDER BY p.created_at DESC
+	`
+
+	rows, err := db.Query(query, currentUserID, userID)
+	if err != nil {
+		log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	posts := make([]Post, 0)
+	for rows.Next() {
+		var p Post
+		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+			log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		posts = append(posts, p)
+	}
+
+	bytes, err := json.Marshal(posts)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (user posts) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
+	log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", userID)
+}
+
 // main関数はアプリケーションのエントリポイントです。
 func main() {
     log.Println("main 関数を開始します...")
@@ -692,6 +754,7 @@ func main() {
     mux.HandleFunc("/api/posts/reply/", replyCreateHandler)
 	mux.HandleFunc("/api/posts/replies/", repliesGetHandler)
 	mux.HandleFunc("/api/posts/suggest-reply", geminiSuggestReplyHandler)
+	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
 	
 	// ★★★ 投稿削除用のエンドポイントをここに追加 ★★★
 	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
