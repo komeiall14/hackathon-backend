@@ -11,42 +11,42 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	// "time" // ulid.Make() が引数を取らないバージョンでは直接は不要
 
-	_ "github.com/go-sql-driver/mysql" // MySQLドライバ
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/generative-ai-go/genai"
-	"github.com/joho/godotenv"         // .envファイル読み込み用
-	"github.com/oklog/ulid/v2"         // ULID生成用
-	"github.com/rs/cors" // CORSミドルウェア
+	"github.com/joho/godotenv"
+	"github.com/oklog/ulid/v2"
+	"github.com/rs/cors"
 	"google.golang.org/api/option"
 )
 
+// ★★★ 修正箇所1 ★★★
 // UserResForHTTPGet はHTTPレスポンス用のユーザー情報の構造体です。
 type UserResForHTTPGet struct {
-	Id   string `json:"id"`
-	Name string `json:"name"`
-	Age  int    `json:"age"`
+	Id          string  `json:"id"`
+	Name        string  `json:"name"`
+	Age         *int    `json:"age"`
+	FirebaseUID *string `json:"firebase_uid"`
 }
+
 // Post は投稿データの構造体です。
 type Post struct {
-	PostID    string `json:"post_id"`
-	UserID    string `json:"user_id"`
-	UserName  string `json:"user_name"`
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
-	LikeCount     int    `json:"like_count"`     
-    IsLikedByMe   bool   `json:"is_liked_by_me"`  
-	ReplyCount    int    `json:"reply_count"` 
+	PostID      string `json:"post_id"`
+	UserID      string `json:"user_id"`
+	UserName    string `json:"user_name"`
+	Content     string `json:"content"`
+	CreatedAt   string `json:"created_at"`
+	LikeCount   int    `json:"like_count"`
+	IsLikedByMe bool   `json:"is_liked_by_me"`
+	ReplyCount  int    `json:"reply_count"`
 }
 
 var db *sql.DB // グローバルなデータベース接続プール
 
-// init関数はmain関数より先に実行され、アプリケーションの初期化処理を行います。
+// init関数は変更ありません
 func init() {
 	log.Println("アプリケーション初期化処理を開始します...")
-
-	// (init関数の内容は変更なしのため省略)
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" { 
+	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
 		log.Println(".env ファイルの読み込みを試みます...")
 		err := godotenv.Load()
 		if err != nil {
@@ -57,66 +57,59 @@ func init() {
 	} else {
 		log.Println("Cloud Run環境を検出しました。.env ファイルは読み込みません。")
 	}
-
 	mysqlUser := os.Getenv("MYSQL_USER")
-	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD") 
+	mysqlUserPwd := os.Getenv("MYSQL_PASSWORD")
 	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
-	mysqlHost := os.Getenv("MYSQL_HOST")         
-	mysqlPort := os.Getenv("MYSQL_PORT")         
-
+	mysqlHost := os.Getenv("MYSQL_HOST")
+	mysqlPort := os.Getenv("MYSQL_PORT")
 	log.Printf("読み込まれた環境変数:\n  MYSQL_USER: %s\n  MYSQL_PASSWORD: [設定済みか確認してください]\n  MYSQL_DATABASE: %s\n  MYSQL_HOST: %s\n  MYSQL_PORT: %s\n",
 		mysqlUser, mysqlDatabase, mysqlHost, mysqlPort)
-
 	if mysqlUser == "" || mysqlDatabase == "" || mysqlHost == "" {
 		log.Panicln("エラー: データベース接続に必要な環境変数 (MYSQL_USER, MYSQL_DATABASE, MYSQL_HOST) が設定されていません。")
 	}
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" && mysqlUserPwd == "" { 
+	if os.Getenv("GOOGLE_CLOUD_PROJECT") != "" && mysqlUserPwd == "" {
 		log.Panicln("エラー: Cloud Run環境でMYSQL_PASSWORDが設定されていません。")
 	}
-
-
 	var dsn string
-	if strings.HasPrefix(mysqlHost, "/cloudsql/") { 
+	if strings.HasPrefix(mysqlHost, "/cloudsql/") {
 		dsn = fmt.Sprintf("%s:%s@unix(%s)/%s?parseTime=true", mysqlUser, mysqlUserPwd, mysqlHost, mysqlDatabase)
 		log.Printf("DSN (Unixソケット): %s\n", fmt.Sprintf("%s:[秘匿]@unix(%s)/%s?parseTime=true", mysqlUser, mysqlHost, mysqlDatabase))
-	} else { 
+	} else {
 		if mysqlPort == "" {
-			mysqlPort = "3308" 
+			mysqlPort = "3308"
 			log.Printf("MYSQL_PORTが未設定のため、デフォルトの %s を使用します。\n", mysqlPort)
 		}
 		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", mysqlUser, mysqlUserPwd, mysqlHost, mysqlPort, mysqlDatabase)
 		log.Printf("DSN (TCP/IP): %s\n", fmt.Sprintf("%s:[秘匿]@tcp(%s:%s)/%s?parseTime=true", mysqlUser, mysqlHost, mysqlPort, mysqlDatabase))
 	}
-
 	log.Println("データベース接続を試みます (sql.Open)...")
 	_db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Panicf("致命的エラー: sql.Open に失敗しました。DSNが不正である可能性があります。エラー: %v\n", err)
 	}
-
 	log.Println("データベースへのPingを試みます...")
 	if err := _db.Ping(); err != nil {
-		maskedDsn := dsn 
+		maskedDsn := dsn
 		if mysqlUserPwd != "" {
 			maskedDsn = strings.Replace(dsn, mysqlUserPwd, "[PASSWORD_MASKED]", 1)
 		}
 		log.Panicf("致命的エラー: _db.Ping に失敗しました。データベースへの接続を確認できません。\n  エラー詳細: %v\n  DSN (マスク済): %s\n", err, maskedDsn)
 	}
-	db = _db 
+	db = _db
 	log.Println("✅ DB接続に成功しました。初期化処理を完了します。")
 }
 
-// handler関数はHTTPリクエストを処理します。
+// ★★★ 修正箇所2 ★★★
+// handler関数を、構造体の変更に合わせて完全に修正します
 func handler(w http.ResponseWriter, r *http.Request) {
-    // (handler関数の内容は変更なしのため省略)
 	log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
 
-    switch r.Method {
-    case http.MethodGet:
-    	name := r.URL.Query().Get("name")
-		if name != "" { 
+	switch r.Method {
+	case http.MethodGet:
+		name := r.URL.Query().Get("name")
+		if name != "" {
 			log.Printf("特定ユーザー検索を開始します: name=%s\n", name)
-			rows, err := db.Query("SELECT id, name, age FROM user WHERE name = ?", name)
+			rows, err := db.Query("SELECT id, name, age, firebase_uid FROM user WHERE name = ?", name)
 			if err != nil {
 				log.Printf("エラー: db.Query (name=%s) に失敗しました。エラー: %v\n", name, err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -127,14 +120,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			users := make([]UserResForHTTPGet, 0)
 			for rows.Next() {
 				var u UserResForHTTPGet
-				if err := rows.Scan(&u.Id, &u.Name, &u.Age); err != nil {
+				if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID); err != nil {
 					log.Printf("エラー: rows.Scan (特定ユーザー検索) に失敗しました。エラー: %v\n", err)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
 				users = append(users, u)
 			}
-			if err := rows.Err(); err != nil { 
+			if err := rows.Err(); err != nil {
 				log.Printf("エラー: rows.Err (特定ユーザー検索) でエラーが発生しました。エラー: %v\n", err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
@@ -153,7 +146,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Println("全ユーザー検索を開始します...")
-		rows, err := db.Query("SELECT id, name, age FROM user")
+		rows, err := db.Query("SELECT id, name, age, firebase_uid FROM user")
 		if err != nil {
 			log.Printf("エラー: db.Query (all users) に失敗しました。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -164,14 +157,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		users := make([]UserResForHTTPGet, 0)
 		for rows.Next() {
 			var u UserResForHTTPGet
-			if err := rows.Scan(&u.Id, &u.Name, &u.Age); err != nil {
+			if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID); err != nil {
 				log.Printf("エラー: rows.Scan (all users) に失敗しました。エラー: %v\n", err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
 			users = append(users, u)
 		}
-		if err := rows.Err(); err != nil { 
+		if err := rows.Err(); err != nil {
 			log.Printf("エラー: rows.Err (all users) でエラーが発生しました。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
@@ -206,8 +199,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Name is too long (max 50 characters)", http.StatusBadRequest)
 			return
 		}
-		if newUser.Age < 0 { 
-			log.Printf("バリデーションエラー: Age が負の値です。入力値: %d\n", newUser.Age)
+		if newUser.Age != nil && *newUser.Age < 0 {
+			log.Printf("バリデーションエラー: Age が負の値です。入力値: %d\n", *newUser.Age)
 			http.Error(w, "Age must be a non-negative value", http.StatusBadRequest)
 			return
 		}
@@ -224,7 +217,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 		_, err = tx.Exec("INSERT INTO user (id, name, age) VALUES (?, ?, ?)", newId, newUser.Name, newUser.Age)
 		if err != nil {
-			tx.Rollback() 
+			tx.Rollback()
 			log.Printf("エラー: tx.Exec (INSERT) に失敗しました。トランザクションをロールバックします。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
@@ -236,61 +229,61 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("ユーザー作成成功: ID=%s, Name=%s, Age=%d\n", newId, newUser.Name, newUser.Age)
+		log.Printf("ユーザー作成成功: ID=%s, Name=%s\n", newId, newUser.Name)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated) 
+		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
 
-	case http.MethodDelete: 
-        log.Println("ユーザー削除処理を開始します...")
+	case http.MethodDelete:
+		log.Println("ユーザー削除処理を開始します...")
 
-        userId := r.URL.Query().Get("id")
-        if userId == "" {
-            log.Println("エラー: ユーザーIDがクエリパラメータに指定されていません。")
-            http.Error(w, "User ID is required as query parameter (e.g., /user?id={id})", http.StatusBadRequest)
-            return
-        }
+		userId := r.URL.Query().Get("id")
+		if userId == "" {
+			log.Println("エラー: ユーザーIDがクエリパラメータに指定されていません。")
+			http.Error(w, "User ID is required as query parameter (e.g., /user?id={id})", http.StatusBadRequest)
+			return
+		}
 
-        log.Printf("ユーザー削除リクエスト: ID=%s\n", userId)
+		log.Printf("ユーザー削除リクエスト: ID=%s\n", userId)
 
-        tx, err := db.Begin() 
-        if err != nil {
-            log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました。エラー: %v\n", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
+		tx, err := db.Begin()
+		if err != nil {
+			log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました。エラー: %v\n", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
 
-        result, err := tx.Exec("DELETE FROM user WHERE id = ?", userId)
-        if err != nil {
-            tx.Rollback() 
-            log.Printf("エラー: tx.Exec (DELETE) に失敗しました。エラー: %v\n", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
+		result, err := tx.Exec("DELETE FROM user WHERE id = ?", userId)
+		if err != nil {
+			tx.Rollback()
+			log.Printf("エラー: tx.Exec (DELETE) に失敗しました。エラー: %v\n", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
 
-        rowsAffected, err := result.RowsAffected()
-        if err != nil {
-            tx.Rollback()
-            log.Printf("エラー: RowsAffected() に失敗しました。エラー: %v\n", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			tx.Rollback()
+			log.Printf("エラー: RowsAffected() に失敗しました。エラー: %v\n", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
 
-        if rowsAffected == 0 {
-            tx.Rollback()
-            log.Printf("エラー: ユーザーID=%s が見つかりませんでした。\n", userId)
-            http.Error(w, "User not found", http.StatusNotFound) 
-            return
-        }
+		if rowsAffected == 0 {
+			tx.Rollback()
+			log.Printf("エラー: ユーザーID=%s が見つかりませんでした。\n", userId)
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
 
-        if err := tx.Commit(); err != nil { 
-            log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました。エラー: %v\n", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
+		if err := tx.Commit(); err != nil {
+			log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました。エラー: %v\n", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
 
-        log.Printf("ユーザーID=%s を正常に削除しました。\n", userId)
-        w.WriteHeader(http.StatusNoContent) 
+		log.Printf("ユーザーID=%s を正常に削除しました。\n", userId)
+		w.WriteHeader(http.StatusNoContent)
 	default:
 		log.Printf("メソッド不允许: HTTPメソッド %s は許可されていません。\n", r.Method)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
