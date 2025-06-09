@@ -5,13 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
-
+	"cloud.google.com/go/storage" 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/generative-ai-go/genai"
 	"github.com/joho/godotenv"
@@ -35,6 +36,7 @@ type Post struct {
 	UserID      string `json:"user_id"`
 	UserName    string `json:"user_name"`
 	Content     string `json:"content"`
+	ImageURL    *string `json:"image_url"` 
 	CreatedAt   string `json:"created_at"`
 	LikeCount   int    `json:"like_count"`
 	IsLikedByMe bool   `json:"is_liked_by_me"`
@@ -293,17 +295,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 // postsGetHandler はトップレベルの投稿を、いいね数やリプライ数と共に取得してJSONで返します。
 func postsGetHandler(w http.ResponseWriter, r *http.Request) {
-	// (postsGetHandler関数の内容は変更なしのため省略)
-	if r.Method != http.MethodGet {
+    if r.Method != http.MethodGet {
         http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
         return
     }
 
     currentUserID := "test-user-123" 
 
+    // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
         SELECT
-            p.post_id, p.user_id, p.user_name, p.content, p.created_at,
+            p.post_id, p.user_id, p.user_name, p.content, p.image_url, p.created_at,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
@@ -326,7 +328,8 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     posts := make([]Post, 0)
     for rows.Next() {
         var p Post
-        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+        // ★★★ Scanに &p.ImageURL を追加 ★★★
+        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
             log.Printf("エラー: rows.Scan (all top-level posts) に失敗しました: %v", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
             return
@@ -347,91 +350,100 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 }
 // postCreateHandler は新しい投稿を作成します。
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
-        return
-    }
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
 
-    var requestBody struct {
-        Content  string `json:"content"`
-        UserID   string `json:"user_id"`   // これはFirebaseのUID
-        UserName string `json:"user_name"` 
-    }
+	// ★ 1. リクエストボディの型にImageURLを追加
+	var requestBody struct {
+		Content  string `json:"content"`
+		UserID   string `json:"user_id"`
+		UserName string `json:"user_name"`
+		ImageURL string `json:"image_url,omitempty"` // omitemptyで空の場合は無視される
+	}
 
-    if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-        log.Printf("エラー: リクエストボディのデコードに失敗しました: %v", err)
-        http.Error(w, "Invalid request body", http.StatusBadRequest)
-        return
-    }
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		log.Printf("エラー: リクエストボディのデコードに失敗しました: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
 
-    if requestBody.Content == "" {
-        log.Println("バリデーションエラー: 投稿内容(content)が空です。")
-        http.Error(w, "投稿内容が空です", http.StatusBadRequest)
-        return
-    }
+	// 画像がない場合でもテキストが空でなければ投稿できるように修正
+	if requestBody.Content == "" && requestBody.ImageURL == "" {
+		log.Println("バリデーションエラー: 投稿内容が空です。")
+		http.Error(w, "投稿内容が空です", http.StatusBadRequest)
+		return
+	}
 
-    // トランザクションを開始
-    tx, err := db.Begin()
-    if err != nil {
-        log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました: %v", err)
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        return
-    }
-    // deferを使って、エラー時に必ずロールバックするようにする
-    defer tx.Rollback()
+	// トランザクションを開始
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	// deferを使って、エラー時に必ずロールバックするようにする
+	defer tx.Rollback()
 
-    // 1. Firebase UIDを元に、userテーブルにユーザーが存在するか確認
-    var userTableID string
-    err = tx.QueryRow("SELECT id FROM user WHERE firebase_uid = ?", requestBody.UserID).Scan(&userTableID)
+	// ユーザーがDBに存在しない場合に新規作成するロジック (変更なし)
+	var userTableID string
+	err = tx.QueryRow("SELECT id FROM user WHERE firebase_uid = ?", requestBody.UserID).Scan(&userTableID)
+	if err == sql.ErrNoRows {
+		log.Printf("ユーザーがDBに存在しないため、新規作成します: firebase_uid=%s", requestBody.UserID)
+		newULID := ulid.Make().String()
+		_, insertErr := tx.Exec(
+			"INSERT INTO user (id, name, firebase_uid) VALUES (?, ?, ?)",
+			newULID,
+			requestBody.UserName,
+			requestBody.UserID,
+		)
+		if insertErr != nil {
+			log.Printf("エラー: userテーブルへのINSERTに失敗: %v", insertErr)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("ユーザー作成成功: id=%s, firebase_uid=%s", newULID, requestBody.UserID)
+	} else if err != nil {
+		log.Printf("エラー: ユーザーの存在確認クエリに失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 
-    // 2. もしユーザーが存在しない場合(sql.ErrNoRows)、新しく作成する
-    if err == sql.ErrNoRows {
-        log.Printf("ユーザーがDBに存在しないため、新規作成します: firebase_uid=%s", requestBody.UserID)
-        newULID := ulid.Make().String() // MySQLのuserテーブル用の新しいID
-        // ageカラムはFirebaseからは直接取得できないため、ここでは登録せずNULLのままにします
-        _, insertErr := tx.Exec(
-            "INSERT INTO user (id, name, firebase_uid) VALUES (?, ?, ?)", 
-            newULID, 
-            requestBody.UserName, 
-            requestBody.UserID,
-        )
-        if insertErr != nil {
-            log.Printf("エラー: userテーブルへのINSERTに失敗: %v", insertErr)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
-        log.Printf("ユーザー作成成功: id=%s, firebase_uid=%s", newULID, requestBody.UserID)
-    } else if err != nil {
-        // その他のDBエラー
-        log.Printf("エラー: ユーザーの存在確認クエリに失敗: %v", err)
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        return
-    }
+	// ★ 2. image_urlをDBに保存する準備
+	// ImageURLが空文字列の場合はDBにNULLを保存する
+	var imageUrlToSave sql.NullString
+	if requestBody.ImageURL != "" {
+		imageUrlToSave.String = requestBody.ImageURL
+		imageUrlToSave.Valid = true
+	}
 
-    // 3. 投稿を作成する（元のロジック）
-    postID := ulid.Make().String()
-    _, err = tx.Exec("INSERT INTO posts (post_id, user_id, user_name, content) VALUES (?, ?, ?, ?)",
-        postID,
-        requestBody.UserID, // postsテーブルのuser_idには引き続きFirebaseのUIDを入れる
-        requestBody.UserName,
-        requestBody.Content)
+	// ★ 3. 投稿を作成するSQLを修正
+	postID := ulid.Make().String()
+	_, err = tx.Exec("INSERT INTO posts (post_id, user_id, user_name, content, image_url) VALUES (?, ?, ?, ?, ?)",
+		postID,
+		requestBody.UserID,
+		requestBody.UserName,
+		requestBody.Content,
+		imageUrlToSave, // image_urlも保存する
+	)
 
-    if err != nil {
-        log.Printf("エラー: postsテーブルへのINSERTに失敗: %v", err)
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        return
-    }
+	if err != nil {
+		log.Printf("エラー: postsテーブルへのINSERTに失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 
-    // 全ての処理が成功したら、トランザクションをコミット
-    if err := tx.Commit(); err != nil {
-        log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました: %v", err)
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        return
-    }
+	// 全ての処理が成功したら、トランザクションをコミット
+	if err := tx.Commit(); err != nil {
+		log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 
-    w.WriteHeader(http.StatusCreated) 
-    log.Printf("投稿作成成功: post_id=%s\n", postID)
-    json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
+	w.WriteHeader(http.StatusCreated)
+	log.Printf("投稿作成成功: post_id=%s\n", postID)
+	json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
 }
 
 // ★★★ 投稿を削除するハンドラ関数をここに追加 ★★★
@@ -586,60 +598,61 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 
 // repliesGetHandler はリプライの一覧を取得します
 func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
-	// (repliesGetHandler関数の内容は変更なしのため省略)
-	if r.Method != http.MethodGet {
-		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
-		return
-	}
+    if r.Method != http.MethodGet {
+        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
 
-	pathSegments := strings.Split(r.URL.Path, "/")
-	if len(pathSegments) < 5 {
-		http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
-		return
-	}
-	parentPostID := pathSegments[4]
-	currentUserID := "test-user-123" 
+    pathSegments := strings.Split(r.URL.Path, "/")
+    if len(pathSegments) < 5 {
+        http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
+        return
+    }
+    parentPostID := pathSegments[4]
+    currentUserID := "test-user-123" 
 
-	query := `
-		SELECT
-			p.post_id, p.user_id, p.user_name, p.content, p.created_at,
-			(SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
-			EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-			(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
-		FROM posts p
-		WHERE p.parent_post_id = ?
-		ORDER BY p.created_at ASC
-	`
+    // ★★★ SELECT句に p.image_url を追加 ★★★
+    query := `
+        SELECT
+            p.post_id, p.user_id, p.user_name, p.content, p.image_url, p.created_at,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+        FROM posts p
+        WHERE p.parent_post_id = ?
+        ORDER BY p.created_at ASC
+    `
 
-	rows, err := db.Query(query, currentUserID, parentPostID)
-	if err != nil {
-		log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
+    rows, err := db.Query(query, currentUserID, parentPostID)
+    if err != nil {
+        log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
 
-	replies := make([]Post, 0)
-	for rows.Next() {
-		var p Post
-		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
-			log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		replies = append(replies, p)
-	}
+    replies := make([]Post, 0)
+    for rows.Next() {
+        var p Post
+        // ★★★ Scanに &p.ImageURL を追加 ★★★
+        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+            log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+        replies = append(replies, p)
+    }
 
-	bytes, err := json.Marshal(replies)
-	if err != nil {
-		log.Printf("エラー: json.Marshal (replies) に失敗しました: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
+    bytes, err := json.Marshal(replies)
+    if err != nil {
+        log.Printf("エラー: json.Marshal (replies) に失敗しました: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(bytes)
-	log.Printf("リプライ一覧の取得リクエスト成功: parent_id=%s", parentPostID)
+    w.Header().Set("Content-Type", "application/json")
+    w.Write(bytes)
+    log.Printf("リプライ一覧の取得リクエスト成功: parent_id=%s", parentPostID)
 }
 
 func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
@@ -702,64 +715,126 @@ func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
 
 // userPostsHandlerは特定のユーザーの投稿一覧を取得します
 func userPostsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+    if r.Method != http.MethodGet {
+        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // URLパスからユーザーIDを取得 (例: /api/users/ここにIDが入る/)
+    pathSegments := strings.Split(r.URL.Path, "/")
+    if len(pathSegments) < 4 || pathSegments[3] == "" {
+        http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
+        return
+    }
+    userID := pathSegments[3]
+
+    log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", userID)
+
+    // ログイン中のユーザーID（いいね判定用、今回は仮）
+    currentUserID := "test-user-123"
+
+    // ★★★ SELECT句に p.image_url を追加 ★★★
+    query := `
+        SELECT
+            p.post_id, p.user_id, p.user_name, p.content, p.image_url, p.created_at,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+        FROM posts p
+        WHERE p.user_id = ? AND p.parent_post_id IS NULL
+        ORDER BY p.created_at DESC
+    `
+
+    rows, err := db.Query(query, currentUserID, userID)
+    if err != nil {
+        log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    posts := make([]Post, 0)
+    for rows.Next() {
+        var p Post
+        // ★★★ Scanに &p.ImageURL を追加 ★★★
+        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+            log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
+            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+            return
+        }
+        posts = append(posts, p)
+    }
+
+    bytes, err := json.Marshal(posts)
+    if err != nil {
+        log.Printf("エラー: json.Marshal (user posts) に失敗: %v", err)
+        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.Write(bytes)
+    log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", userID)
+}
+
+// imageUploadHandler は画像を受け取りGCSにアップロードします
+func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// URLパスからユーザーIDを取得 (例: /api/users/ここにIDが入る/)
-	pathSegments := strings.Split(r.URL.Path, "/")
-	if len(pathSegments) < 4 || pathSegments[3] == "" {
-		http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
-		return
-	}
-	userID := pathSegments[3]
-
-	log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", userID)
-
-	// ログイン中のユーザーID（いいね判定用、今回は仮）
-	currentUserID := "test-user-123"
-
-	query := `
-		SELECT
-			p.post_id, p.user_id, p.user_name, p.content, p.created_at,
-			(SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
-			EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-			(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
-		FROM posts p
-		WHERE p.user_id = ? AND p.parent_post_id IS NULL
-		ORDER BY p.created_at DESC
-	`
-
-	rows, err := db.Query(query, currentUserID, userID)
+	// 1. リクエストから画像ファイルを取得
+	file, _, err := r.FormFile("image") // "image"はフロントエンドから送る際のキー名
 	if err != nil {
-		log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		log.Printf("画像の取得に失敗: %v", err)
+		http.Error(w, "画像の取得に失敗しました", http.StatusBadRequest)
 		return
 	}
-	defer rows.Close()
+	defer file.Close()
 
-	posts := make([]Post, 0)
-	for rows.Next() {
-		var p Post
-		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
-			log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		posts = append(posts, p)
+	// 2. GCSのバケット名とクライアントを準備
+	ctx := context.Background()
+	bucketName := os.Getenv("GCS_BUCKET_NAME")
+	if bucketName == "" {
+		log.Println("環境変数 GCS_BUCKET_NAME が設定されていません")
+		http.Error(w, "サーバー設定エラー", http.StatusInternalServerError)
+		return
 	}
 
-	bytes, err := json.Marshal(posts)
+	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Printf("エラー: json.Marshal (user posts) に失敗: %v", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		log.Printf("GCSクライアントの作成に失敗: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer client.Close()
+
+	// 3. GCSに保存する際のファイル名を生成（ULIDでユニークな名前を付ける）
+	objectName := ulid.Make().String() + ".png" // 拡張子は適宜変更
+	
+	// 4. GCSへの書き込み準備
+	writer := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
+	// この設定で、アップロードした画像が一般公開される
+	writer.ACL = []storage.ACLRule{{Entity: storage.AllUsers, Role: storage.RoleReader}}
+
+	// 5. ファイルをGCSにコピー（アップロード）
+	if _, err := io.Copy(writer, file); err != nil {
+		log.Printf("GCSへのファイルコピーに失敗: %v", err)
+		http.Error(w, "アップロードに失敗しました", http.StatusInternalServerError)
+		return
+	}
+	if err := writer.Close(); err != nil {
+		log.Printf("GCS writerのクローズに失敗: %v", err)
+		http.Error(w, "アップロード後の処理に失敗しました", http.StatusInternalServerError)
 		return
 	}
 
+	// 6. フロントエンドに、公開された画像のURLを返す
+	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(bytes)
-	log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", userID)
+	json.NewEncoder(w).Encode(map[string]string{"imageUrl": publicURL})
+	log.Printf("画像アップロード成功: %s", publicURL)
 }
 
 // main関数はアプリケーションのエントリポイントです。
@@ -779,6 +854,7 @@ func main() {
 	mux.HandleFunc("/api/posts/suggest-reply", geminiSuggestReplyHandler)
 	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
 	mux.HandleFunc("/api/users/", userPostsHandler)
+	mux.HandleFunc("/api/post/image", imageUploadHandler)
 	
 
 
