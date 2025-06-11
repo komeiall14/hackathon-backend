@@ -1,4 +1,4 @@
-# --- 実行ステージでだけJSONを使うなら、こうするのがシンプル ---
+# --- 実行ステージでだけJSONを使うなら、こうするのがシンプル. ---
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
