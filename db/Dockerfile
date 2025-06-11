@@ -6,12 +6,12 @@
     WORKDIR /app
     
     # ビルドコンテキスト(プロジェクトルート)から見て、db/ にあるファイルをコピーする
-    COPY db/go.mod db/go.sum ./
+    COPY go.mod go.sum ./
     RUN go mod download
     
     # db/ にあるキーファイルとGoのソースファイルをコピー
-    COPY db/term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
-    COPY db/*.go ./
+    COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
+    COPY *.go ./
     
     # アプリケーションをビルドc
     RUN CGO_ENABLED=0 GOOS=linux go build -v -ldflags="-s -w" -o /server .
