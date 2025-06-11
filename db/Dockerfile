@@ -12,7 +12,7 @@ RUN apk --no-cache add ca-certificates tzdata
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app/
 COPY --from=builder /server .
-COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .  # ←これだけでOK
+COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json . 
 USER appuser
 EXPOSE 8080
 CMD ["./server"]
