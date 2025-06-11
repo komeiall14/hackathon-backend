@@ -20,7 +20,10 @@ import (
 	"github.com/rs/cors"
 	"google.golang.org/api/option"
 )
-
+import (
+	"firebase.google.com/go/v4" // ★ 追加
+	"firebase.google.com/go/v4/auth" // ★ 追加
+)
 // ★★★ 修正箇所1 ★★★
 // UserResForHTTPGet はHTTPレスポンス用のユーザー情報の構造体です。
 type UserResForHTTPGet struct {
@@ -44,6 +47,11 @@ type Post struct {
 }
 
 var db *sql.DB // グローバルなデータベース接続プール
+var firebaseAuth *auth.Client // ★ 追加：Firebase Authクライアントをグローバル変数として保持
+
+// ★★★ この2行を追加 ★★★
+type contextKey string
+const userIDKey contextKey = "userID"
 
 // init関数は変更ありません
 func init() {
@@ -99,6 +107,22 @@ func init() {
 	}
 	db = _db
 	log.Println("✅ DB接続に成功しました。初期化処理を完了します。")
+	// Firebase Admin SDKの初期化
+	serviceAccountKey := os.Getenv("FIREBASE_SERVICE_ACCOUNT_KEY_PATH")
+	if serviceAccountKey == "" {
+		serviceAccountKey = "term7-459800-firebase-adminsdk-fbsvc-869b36b213.json" // ローカル用のデフォルト値
+	}
+	opt := option.WithCredentialsFile(serviceAccountKey)
+	app, err := firebase.NewApp(context.Background(), nil, opt)
+	if err != nil {
+		log.Fatalf("Firebase Admin SDKの初期化エラー: %v\n", err)
+	}
+	client, err := app.Auth(context.Background())
+	if err != nil {
+		log.Fatalf("Firebase Authクライアントの取得エラー: %v\n", err)
+	}
+	firebaseAuth = client
+	log.Println("✅ Firebase Admin SDKの初期化に成功しました。")
 }
 
 // ★★★ 修正箇所2 ★★★
@@ -300,7 +324,10 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    currentUserID := "test-user-123" 
+    currentUserID := ""
+	if userID, ok := r.Context().Value(userIDKey).(string); ok {
+		currentUserID = userID
+	}
 
     // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
@@ -505,76 +532,105 @@ func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// likeHandler はいいねの作成と削除を処理します
+// ★★★ likeHandlerの修正 ★★★
 func likeHandler(w http.ResponseWriter, r *http.Request) {
-    // (likeHandler関数の内容は変更なしのため省略)
 	pathSegments := strings.Split(r.URL.Path, "/")
-    if len(pathSegments) < 5 { 
-        http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
-        return
-    }
-    postID := pathSegments[4]
+	if len(pathSegments) < 5 {
+		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	postID := pathSegments[4]
 
-    userID := "test-user-123" 
+	// ★★★ 鍵を "userID" という文字列から userIDKey 定数に変更 ★★★
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		log.Println("エラー: likeHandlerでコンテキストからユーザーIDを取得できませんでした。")
+		http.Error(w, "Could not retrieve user from context", http.StatusInternalServerError)
+		return
+	}
 
-    switch r.Method {
-    case http.MethodPost: 
-        likeID := ulid.Make().String()
-        _, err := db.Exec("INSERT INTO likes (like_id, user_id, post_id) VALUES (?, ?, ?)", likeID, userID, postID)
-        if err != nil {
-            log.Printf("エラー: db.Exec (insert like) に失敗しました: %v", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
-        w.WriteHeader(http.StatusCreated)
-        log.Printf("いいね成功: user_id=%s, post_id=%s", userID, postID)
+	switch r.Method {
+	case http.MethodPost:
+		likeID := ulid.Make().String()
+		_, err := db.Exec("INSERT INTO likes (like_id, user_id, post_id) VALUES (?, ?, ?)", likeID, userID, postID)
+		if err != nil {
+			log.Printf("エラー: db.Exec (insert like) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		log.Printf("いいね成功: user_id=%s, post_id=%s", userID, postID)
 
-    case http.MethodDelete: 
-        _, err := db.Exec("DELETE FROM likes WHERE user_id = ? AND post_id = ?", userID, postID)
-        if err != nil {
-            log.Printf("エラー: db.Exec (delete like) に失敗しました: %v", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
-        w.WriteHeader(http.StatusNoContent)
-        log.Printf("いいね取り消し成功: user_id=%s, post_id=%s", userID, postID)
+	case http.MethodDelete:
+		_, err := db.Exec("DELETE FROM likes WHERE user_id = ? AND post_id = ?", userID, postID)
+		if err != nil {
+			log.Printf("エラー: db.Exec (delete like) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		log.Printf("いいね取り消し成功: user_id=%s, post_id=%s", userID, postID)
 
-    default:
-        http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
-    }
+	default:
+		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+	}
 }
 
+
 // replyCreateHandlerは特定の投稿への新しいリプライを作成します
+// main.go の replyCreateHandler 関数をこの内容に置き換えてください
+
 func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
-	// (replyCreateHandler関数の内容は変更なしのため省略)
 	if r.Method != http.MethodPost {
+		log.Printf("メソッド不允许: /api/posts/reply/ に %s メソッドでアクセスがありました\n", r.Method)
 		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
 	pathSegments := strings.Split(r.URL.Path, "/")
-	if len(pathSegments) < 5 { 
+	if len(pathSegments) < 5 {
+		log.Println("エラー: リプライ先の投稿IDがパスに含まれていません。")
 		http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
 		return
 	}
-	parentPostID := pathSegments[4] 
+	parentPostID := pathSegments[4]
 
+	// 認証済みのユーザーIDをコンテキストから取得
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		// ★★★ ログ出力を追加 ★★★
+		log.Println("エラー: コンテキストからユーザーIDを取得できませんでした。authMiddlewareが正しく適用されていない可能性があります。")
+		http.Error(w, "ユーザーIDが取得できませんでした", http.StatusInternalServerError)
+		return
+	}
+	
 	var requestBody struct {
-		Content string `json:"content"`
+		Content  string `json:"content"`
+		UserName string `json:"user_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		// ★★★ ログ出力を追加 ★★★
+		log.Printf("エラー: リクエストボディのデコードに失敗しました: %v\n", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	if requestBody.Content == "" {
+	
+	if strings.TrimSpace(requestBody.Content) == "" {
+		log.Println("エラー: リプライ内容が空です。")
 		http.Error(w, "リプライ内容が空です", http.StatusBadRequest)
 		return
 	}
-
-	userID := "test-user-123" 
-	userName := "テストリプライユーザー"
-
+	
+	userName := requestBody.UserName
+	if userName == "" {
+		// ユーザー名が空の場合、DBから取得を試みる
+		err := db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
+		if err != nil {
+			log.Printf("警告: DBからユーザー名の取得に失敗しました (firebase_uid: %s): %v。'名無しさん'を代用します。\n", userID, err)
+			userName = "名無しさん"
+		}
+	}
+	
 	replyID := ulid.Make().String()
 
 	_, err := db.Exec(
@@ -583,7 +639,7 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 		userID,
 		userName,
 		requestBody.Content,
-		parentPostID, 
+		parentPostID,
 	)
 	if err != nil {
 		log.Printf("エラー: db.Exec (insert reply) に失敗しました: %v", err)
@@ -592,8 +648,8 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s", replyID, parentPostID)
 	json.NewEncoder(w).Encode(map[string]string{"reply_id": replyID})
+	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s\n", replyID, parentPostID)
 }
 
 // repliesGetHandler はリプライの一覧を取得します
@@ -609,7 +665,10 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     parentPostID := pathSegments[4]
-    currentUserID := "test-user-123" 
+    currentUserID := ""
+	if userID, ok := r.Context().Value(userIDKey).(string); ok {
+		currentUserID = userID
+	}
 
     // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
@@ -731,7 +790,10 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
     log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", userID)
 
     // ログイン中のユーザーID（いいね判定用、今回は仮）
-    currentUserID := "test-user-123"
+    currentUserID := ""
+	if userID, ok := r.Context().Value(userIDKey).(string); ok {
+		currentUserID = userID
+	}
 
     // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
@@ -816,7 +878,7 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	// 4. GCSへの書き込み準備
 	writer := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
 	// この設定で、アップロードした画像が一般公開される
-	writer.ACL = []storage.ACLRule{{Entity: storage.AllUsers, Role: storage.RoleReader}}
+	//writer.ACL = []storage.ACLRule{{Entity: storage.AllUsers, Role: storage.RoleReader}}
 
 	// 5. ファイルをGCSにコピー（アップロード）
 	if _, err := io.Copy(writer, file); err != nil {
@@ -837,61 +899,97 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("画像アップロード成功: %s", publicURL)
 }
 
+// authMiddleware はリクエストヘッダーからIDトークンを検証するミドルウェア
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Authorization header must be provided", http.StatusUnauthorized)
+			return
+		}
+		idToken := strings.TrimPrefix(authHeader, "Bearer ")
+		if idToken == authHeader {
+			http.Error(w, "Authorization header must be Bearer token", http.StatusUnauthorized)
+			return
+		}
+		token, err := firebaseAuth.VerifyIDToken(context.Background(), idToken)
+		if err != nil {
+			log.Printf("error verifying ID token: %v\n", err)
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+		// ★★★ 鍵を "userID" という文字列から userIDKey 定数に変更 ★★★
+		ctx := context.WithValue(r.Context(), userIDKey, token.UID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// ★★★ 認証ミドルウェア（オプショナル） ★★★
+func authOptionalMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		idToken := strings.TrimPrefix(authHeader, "Bearer ")
+		if idToken != authHeader {
+			token, err := firebaseAuth.VerifyIDToken(context.Background(), idToken)
+			if err == nil {
+				ctx := context.WithValue(r.Context(), userIDKey, token.UID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // main関数はアプリケーションのエントリポイントです。
+// main.go の main 関数を、この内容に完全に置き換えてください
+
 func main() {
-    log.Println("main 関数を開始します...")
-    log.Println("DEBUG: main function started successfully. Proceeding to setup router and CORS.")
+	log.Println("main 関数を開始します...")
+	mux := http.NewServeMux() // 新しいルーター(mux)を作成
 
-    mux := http.NewServeMux()
-    mux.HandleFunc("/user", handler)
-    log.Println("/user エンドポイントのハンドラを設定しました。")
+	// --- 認証がオプショナルなエンドポイント (ログイン状態によって結果が変わるGET系) ---
+	mux.Handle("/posts", authOptionalMiddleware(http.HandlerFunc(postsGetHandler)))
+	mux.Handle("/api/posts/replies/", authOptionalMiddleware(http.HandlerFunc(repliesGetHandler)))
+	mux.Handle("/api/users/", authOptionalMiddleware(http.HandlerFunc(userPostsHandler)))
 
-	mux.HandleFunc("/posts", postsGetHandler)
-	mux.HandleFunc("/post", postCreateHandler)
-    mux.HandleFunc("/api/posts/like/", likeHandler)
-    mux.HandleFunc("/api/posts/reply/", replyCreateHandler)
-	mux.HandleFunc("/api/posts/replies/", repliesGetHandler)
-	mux.HandleFunc("/api/posts/suggest-reply", geminiSuggestReplyHandler)
-	mux.HandleFunc("/api/posts/delete/", postDeleteHandler)
-	mux.HandleFunc("/api/users/", userPostsHandler)
-	mux.HandleFunc("/api/post/image", imageUploadHandler)
-	
+	// --- 認証が必須なエンドポイント (データの作成・変更・削除やAI利用など) ---
+	mux.Handle("/post", authMiddleware(http.HandlerFunc(postCreateHandler)))
+	mux.Handle("/api/post/image", authMiddleware(http.HandlerFunc(imageUploadHandler)))
+	mux.Handle("/api/posts/like/", authMiddleware(http.HandlerFunc(likeHandler)))
+	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler))) // ★★★ 正しい設定
+	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
+	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
 
+	// --- 認証が不要なエンドポイント ---
+	mux.HandleFunc("/user", handler) 
 
-    log.Println("DEBUG: CORS middleware configuration point.") 
-    c := cors.New(cors.Options{
-        AllowedOrigins: []string{
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "https://hackathon-frontend-ver.vercel.app",
-            "https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
-            "https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
+	// CORS設定
+	c := cors.New(cors.Options{
+		AllowedOrigins: []string{
+			"http://localhost:3000",
+			"http://localhost:5173",
+			"https://hackathon-frontend-ver.vercel.app",
+			"https://hackathon-frontend-ver-git-main-komeiall14s-projects.vercel.app",
+			"https://hackathon-frontend-a0lipvgmk-komeiall14s-projects.vercel.app",
 			"https://hackathon-frontend-1pis2eltq-komeiall14s-projects.vercel.app",
-        },
-        AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-        AllowedHeaders:   []string{"Content-Type", "Authorization"},
-        AllowCredentials: true,
-        Debug:            true,
-    })
+		},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: true,
+	})
+	handlerWithCORS := c.Handler(mux)
 
-    handlerWithCORS := c.Handler(mux)
-    log.Println("DEBUG: CORS middleware applied to handler.")
+	closeDBWithSysCall()
 
-    closeDBWithSysCall()
-    log.Println("システムコールによるDBクローズ処理を設定しました。")
-
-    port := os.Getenv("PORT")
-    if port == "" {
-        port = "8080"
-        log.Printf("環境変数 PORT が未設定のため、デフォルトの %s を使用します。\n", port)
-    }
-
-    log.Printf("HTTPサーバーをポート %s で起動します...\n", port)
-    log.Printf("DEBUG: About to call ListenAndServe. Port: %s", port)
-
-    if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil {
-        log.Fatalf("致命的エラー: ListenAndServe に失敗しました。ポート %s を使用できませんでした: %v", port, err)
-    }
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("HTTPサーバーをポート %s で起動します...\n", port)
+	if err := http.ListenAndServe(":"+port, handlerWithCORS); err != nil {
+		log.Fatalf("致命的エラー: ListenAndServe に失敗しました: %v", err)
+	}
 }
 
 // closeDBWithSysCall関数はOSのシグナル(SIGTERM, SIGINT)を補足し、DB接続を安全にクローズします。
