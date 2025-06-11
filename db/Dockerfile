@@ -13,7 +13,7 @@
     COPY db/term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
     COPY db/*.go ./
     
-    # アプリケーションをビルド
+    # アプリケーションをビルドc
     RUN CGO_ENABLED=0 GOOS=linux go build -v -ldflags="-s -w" -o /server .
     
     # --- 実行ステージ ---
