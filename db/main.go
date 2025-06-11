@@ -95,29 +95,35 @@ func init() {
 	log.Println("データベース接続を試みます (sql.Open)...")
 	_db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Panicf("致命的エラー: sql.Open に失敗しました。DSNが不正である可能性があります。エラー: %v\n", err)
+		log.Panicf("致命的エラー: sql.Open に失敗しました。: %v\n", err)
 	}
-	log.Println("データベースへのPingを試みます...")
-	if err := _db.Ping(); err != nil {
-		maskedDsn := dsn
-		if mysqlUserPwd != "" {
-			maskedDsn = strings.Replace(dsn, mysqlUserPwd, "[PASSWORD_MASKED]", 1)
-		}
-		log.Panicf("致命的エラー: _db.Ping に失敗しました。データベースへの接続を確認できません。\n  エラー詳細: %v\n  DSN (マスク済): %s\n", err, maskedDsn)
+	if err := _db.Ping(); err != nil { // このerrはif文の中だけなので問題なし
+		maskedDsn := strings.Replace(dsn, mysqlUserPwd, "[PASSWORD_MASKED]", 1)
+		log.Panicf("致命的エラー: _db.Ping に失敗しました。\n  DSN(マスク済): %s\n  エラー: %v\n", maskedDsn, err)
 	}
 	db = _db
-	log.Println("✅ DB接続に成功しました。初期化処理を完了します。")
+	log.Println("✅ DB接続に成功しました。")
+
 	// Firebase Admin SDKの初期化
 	serviceAccountKey := os.Getenv("FIREBASE_SERVICE_ACCOUNT_KEY_PATH")
 	if serviceAccountKey == "" {
-		serviceAccountKey = "term7-459800-firebase-adminsdk-fbsvc-869b36b213.json" // ローカル用のデフォルト値
+		serviceAccountKey = "term7-459800-firebase-adminsdk-fbsvc-869b36b213.json" // あなたのキーファイル名
 	}
+
 	opt := option.WithCredentialsFile(serviceAccountKey)
-	app, err := firebase.NewApp(context.Background(), nil, opt)
+	
+	// ★★★ 修正点1: `:=` を `=` に変更 ★★★
+	// appは新しい変数だが、errは既存の変数なので `=` を使う
+	var app *firebase.App
+	app, err = firebase.NewApp(context.Background(), nil, opt)
 	if err != nil {
 		log.Fatalf("Firebase Admin SDKの初期化エラー: %v\n", err)
 	}
-	client, err := app.Auth(context.Background())
+
+	// ★★★ 修正点2: `:=` を `=` に変更 ★★★
+	// clientは新しい変数だが、errは既存の変数なので `=` を使う
+	var client *auth.Client
+	client, err = app.Auth(context.Background())
 	if err != nil {
 		log.Fatalf("Firebase Authクライアントの取得エラー: %v\n", err)
 	}
