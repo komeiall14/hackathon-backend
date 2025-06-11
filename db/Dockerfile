@@ -1,19 +1,17 @@
-# hackathon-backend/db/Dockerfile
-
 # --- ビルドステージ ---
     FROM golang:1.24-alpine AS builder
 
     WORKDIR /app
     
-    # ビルドコンテキスト(プロジェクトルート)から見て、db/ にあるファイルをコピーする
+    # 依存関係の取得
     COPY go.mod go.sum ./
     RUN go mod download
     
-    # db/ にあるキーファイルとGoのソースファイルをコピー
+    # GoコードとFirebaseのキーファイルをコピー
     COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
     COPY *.go ./
     
-    # アプリケーションをビルドc
+    # Goアプリケーションのビルド
     RUN CGO_ENABLED=0 GOOS=linux go build -v -ldflags="-s -w" -o /server .
     
     # --- 実行ステージ ---
@@ -24,14 +22,11 @@
     
     WORKDIR /app/
     
-    # ビルドステージから実行ファイルとキーファイルをコピーする
+    # ビルド成果物とJSONキーファイルをコピー（← ここを修正）
     COPY --from=builder /server .
-    COPY --from=builder /app/term7-459800-firebase-adminsdk-fbsvc-869b213.json .
+    COPY --from=builder /app/term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
     
-    # アプリケーションを実行するユーザーを指定
     USER appuser
-    
     EXPOSE 8080
-    
     CMD ["./server"]
     
