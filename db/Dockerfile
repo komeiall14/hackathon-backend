@@ -24,7 +24,7 @@
     
     WORKDIR /app/
     
-    # ビルドステージから実行ファイルとキーファイルをコピー
+    # ビルドステージから実行ファイルとキーファイルをコピーする
     COPY --from=builder /server .
     COPY --from=builder /app/term7-459800-firebase-adminsdk-fbsvc-869b213.json .
     
