@@ -2,8 +2,6 @@
     FROM golang:1.24-alpine AS builder
 
     WORKDIR /app
-    # ★★★ 修正点: 'db/' のプレフィックスをすべて削除 ★★★
-    # ファイルがルートディレクトリに移動したため、パス指定が不要になります。
     COPY go.mod go.sum ./
     RUN go mod download
     COPY *.go ./
@@ -14,10 +12,13 @@
     RUN addgroup -S appgroup && adduser -S appuser -G appgroup
     WORKDIR /app/
     COPY --from=builder /server .
-    # ★★★ 修正点: 'db/' のプレフィックスをすべて削除 ★★★
     COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
     
-    # 環境変数を設定して、Goアプリケーションがファイルのフルパスを認識できるようにします。
+    # ★★★ この1行が最終的な解決策です ★★★
+    # /app ディレクトリにあるすべてのファイルの所有者を appuser に変更します。
+    RUN chown -R appuser:appgroup /app
+    
+    # 環境変数はCloud Run側で設定するため、ここでの設定は不要です（残しておいても害はありません）
     ENV FIREBASE_SERVICE_ACCOUNT_KEY_PATH /app/term7-459800-firebase-adminsdk-fbsvc-869b36b213.json
     
     USER appuser
