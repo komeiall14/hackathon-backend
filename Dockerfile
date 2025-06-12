@@ -15,7 +15,7 @@
     COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
     
     # ★★★ この1行が最終的な解決策です ★★★
-    # /app ディレクトリにあるすべてのファイルの所有者を appuser に変更します。
+    # /app ディレクトリにあるすべてのファイルの所有者を appuser に変更します。.
     RUN chown -R appuser:appgroup /app
     
     # 環境変数はCloud Run側で設定するため、ここでの設定は不要です（残しておいても害はありません）
