@@ -12,7 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"cloud.google.com/go/storage" 
+	"cloud.google.com/go/storage"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/generative-ai-go/genai"
 	"github.com/joho/godotenv"
@@ -21,11 +21,9 @@ import (
 	"google.golang.org/api/option"
 )
 import (
-	"firebase.google.com/go/v4" // ★ 追加
-	"firebase.google.com/go/v4/auth" // ★ 追加
+	"firebase.google.com/go/v4"
+	"firebase.google.com/go/v4/auth"
 )
-// ★★★ 修正箇所1 ★★★
-// UserResForHTTPGet はHTTPレスポンス用のユーザー情報の構造体です。
 type UserResForHTTPGet struct {
 	Id          string  `json:"id"`
 	Name        string  `json:"name"`
@@ -33,27 +31,24 @@ type UserResForHTTPGet struct {
 	FirebaseUID *string `json:"firebase_uid"`
 }
 
-// Post は投稿データの構造体です。
 type Post struct {
 	PostID      string `json:"post_id"`
 	UserID      string `json:"user_id"`
 	UserName    string `json:"user_name"`
 	Content     string `json:"content"`
-	ImageURL    *string `json:"image_url"` 
+	ImageURL    *string `json:"image_url"`
 	CreatedAt   string `json:"created_at"`
 	LikeCount   int    `json:"like_count"`
 	IsLikedByMe bool   `json:"is_liked_by_me"`
 	ReplyCount  int    `json:"reply_count"`
 }
 
-var db *sql.DB // グローバルなデータベース接続プール
-var firebaseAuth *auth.Client // ★ 追加：Firebase Authクライアントをグローバル変数として保持
+var db *sql.DB
+var firebaseAuth *auth.Client
 
-// ★★★ この2行を追加 ★★★
 type contextKey string
 const userIDKey contextKey = "userID"
 
-// init関数は変更ありません
 func init() {
 	log.Println("アプリケーション初期化処理を開始します...")
 	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
@@ -97,7 +92,7 @@ func init() {
 	if err != nil {
 		log.Panicf("致命的エラー: sql.Open に失敗しました。: %v\n", err)
 	}
-	if err := _db.Ping(); err != nil { // このerrはif文の中だけなので問題なし
+	if err := _db.Ping(); err != nil {
 		maskedDsn := strings.Replace(dsn, mysqlUserPwd, "[PASSWORD_MASKED]", 1)
 		log.Panicf("致命的エラー: _db.Ping に失敗しました。\n  DSN(マスク済): %s\n  エラー: %v\n", maskedDsn, err)
 	}
@@ -107,32 +102,31 @@ func init() {
 	// Firebase Admin SDKの初期化
 	serviceAccountKey := os.Getenv("FIREBASE_SERVICE_ACCOUNT_KEY_PATH")
 	if serviceAccountKey == "" {
-		serviceAccountKey = "term7-459800-firebase-adminsdk-fbsvc-869b36b213.json" // あなたのキーファイル名
+		log.Println("環境変数 FIREBASE_SERVICE_ACCOUNT_KEY_PATH が空のため、フォールバックのファイル名を使用します。")
+		serviceAccountKey = "term7-459800-firebase-adminsdk-fbsvc-869b36b213.json"
 	}
+
+	// ★★★ このログを追加 ★★★
+	// 実際にどのパスでファイルを読み込もうとしているかを確認するためのログ
+	log.Printf("Firebase資格情報ファイルの読み込みを試みます: path=%s\n", serviceAccountKey)
 
 	opt := option.WithCredentialsFile(serviceAccountKey)
 	
-	// ★★★ 修正点1: `:=` を `=` に変更 ★★★
-	// appは新しい変数だが、errは既存の変数なので `=` を使う
 	var app *firebase.App
-	app, err = firebase.NewApp(context.Background(), nil, opt)
-	if err != nil {
-		log.Fatalf("Firebase Admin SDKの初期化エラー: %v\n", err)
+	var initErr error // エラー変数を別名で宣言
+	app, initErr = firebase.NewApp(context.Background(), nil, opt)
+	if initErr != nil {
+		log.Fatalf("Firebase Admin SDKの初期化エラー: %v\n", initErr)
 	}
 
-	// ★★★ 修正点2: `:=` を `=` に変更 ★★★
-	// clientは新しい変数だが、errは既存の変数なので `=` を使う
-	var client *auth.Client
-	client, err = app.Auth(context.Background())
-	if err != nil {
-		log.Fatalf("Firebase Authクライアントの取得エラー: %v\n", err)
+	client, authErr := app.Auth(context.Background()) // エラー変数を別名で宣言
+	if authErr != nil {
+		log.Fatalf("Firebase Authクライアントの取得エラー: %v\n", authErr)
 	}
 	firebaseAuth = client
 	log.Println("✅ Firebase Admin SDKの初期化に成功しました。")
 }
 
-// ★★★ 修正箇所2 ★★★
-// handler関数を、構造体の変更に合わせて完全に修正します
 func handler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
 
@@ -322,8 +316,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
-// postsGetHandler はトップレベルの投稿を、いいね数やリプライ数と共に取得してJSONで返します。
 func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
         http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
@@ -335,7 +327,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 		currentUserID = userID
 	}
 
-    // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
         SELECT
             p.post_id, p.user_id, p.user_name, p.content, p.image_url, p.created_at,
@@ -361,7 +352,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     posts := make([]Post, 0)
     for rows.Next() {
         var p Post
-        // ★★★ Scanに &p.ImageURL を追加 ★★★
         if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
             log.Printf("エラー: rows.Scan (all top-level posts) に失敗しました: %v", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -381,19 +371,18 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     w.Write(bytes)
     log.Println("トップレベルの投稿（いいね・リプライ数付き）の取得リクエスト成功")
 }
-// postCreateHandler は新しい投稿を作成します。
+
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// ★ 1. リクエストボディの型にImageURLを追加
 	var requestBody struct {
 		Content  string `json:"content"`
 		UserID   string `json:"user_id"`
 		UserName string `json:"user_name"`
-		ImageURL string `json:"image_url,omitempty"` // omitemptyで空の場合は無視される
+		ImageURL string `json:"image_url,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
@@ -402,24 +391,20 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 画像がない場合でもテキストが空でなければ投稿できるように修正
 	if requestBody.Content == "" && requestBody.ImageURL == "" {
 		log.Println("バリデーションエラー: 投稿内容が空です。")
 		http.Error(w, "投稿内容が空です", http.StatusBadRequest)
 		return
 	}
 
-	// トランザクションを開始
 	tx, err := db.Begin()
 	if err != nil {
 		log.Printf("エラー: db.Begin (トランザクション開始) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	// deferを使って、エラー時に必ずロールバックするようにする
 	defer tx.Rollback()
 
-	// ユーザーがDBに存在しない場合に新規作成するロジック (変更なし)
 	var userTableID string
 	err = tx.QueryRow("SELECT id FROM user WHERE firebase_uid = ?", requestBody.UserID).Scan(&userTableID)
 	if err == sql.ErrNoRows {
@@ -443,22 +428,19 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ★ 2. image_urlをDBに保存する準備
-	// ImageURLが空文字列の場合はDBにNULLを保存する
 	var imageUrlToSave sql.NullString
 	if requestBody.ImageURL != "" {
 		imageUrlToSave.String = requestBody.ImageURL
 		imageUrlToSave.Valid = true
 	}
 
-	// ★ 3. 投稿を作成するSQLを修正
 	postID := ulid.Make().String()
 	_, err = tx.Exec("INSERT INTO posts (post_id, user_id, user_name, content, image_url) VALUES (?, ?, ?, ?, ?)",
 		postID,
 		requestBody.UserID,
 		requestBody.UserName,
 		requestBody.Content,
-		imageUrlToSave, // image_urlも保存する
+		imageUrlToSave,
 	)
 
 	if err != nil {
@@ -467,7 +449,6 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 全ての処理が成功したら、トランザクションをコミット
 	if err := tx.Commit(); err != nil {
 		log.Printf("エラー: tx.Commit (トランザクションコミット) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -479,16 +460,14 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
 }
 
-// ★★★ 投稿を削除するハンドラ関数をここに追加 ★★★
 func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETEメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// パスから投稿IDを取得 (例: /api/posts/delete/{postID})
 	pathSegments := strings.Split(r.URL.Path, "/")
-	if len(pathSegments) < 5 || pathSegments[4] == "" { // ID部分が空でないかチェック
+	if len(pathSegments) < 5 || pathSegments[4] == "" {
 		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
 		return
 	}
@@ -503,7 +482,6 @@ func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 投稿を削除する (もしリプライなども同時に削除したい場合は、ここに追加のDELETE文を書く)
 	result, err := tx.Exec("DELETE FROM posts WHERE post_id = ?", postID)
 	if err != nil {
 		tx.Rollback()
@@ -534,11 +512,9 @@ func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("投稿削除成功: post_id=%s", postID)
-	w.WriteHeader(http.StatusNoContent) // 成功時は 204 No Content を返す
+	w.WriteHeader(http.StatusNoContent)
 }
 
-
-// ★★★ likeHandlerの修正 ★★★
 func likeHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
 	if len(pathSegments) < 5 {
@@ -547,7 +523,6 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	postID := pathSegments[4]
 
-	// ★★★ 鍵を "userID" という文字列から userIDKey 定数に変更 ★★★
 	userID, ok := r.Context().Value(userIDKey).(string)
 	if !ok {
 		log.Println("エラー: likeHandlerでコンテキストからユーザーIDを取得できませんでした。")
@@ -582,10 +557,6 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
-// replyCreateHandlerは特定の投稿への新しいリプライを作成します
-// main.go の replyCreateHandler 関数をこの内容に置き換えてください
-
 func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		log.Printf("メソッド不允许: /api/posts/reply/ に %s メソッドでアクセスがありました\n", r.Method)
@@ -601,10 +572,8 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	parentPostID := pathSegments[4]
 
-	// 認証済みのユーザーIDをコンテキストから取得
 	userID, ok := r.Context().Value(userIDKey).(string)
 	if !ok {
-		// ★★★ ログ出力を追加 ★★★
 		log.Println("エラー: コンテキストからユーザーIDを取得できませんでした。authMiddlewareが正しく適用されていない可能性があります。")
 		http.Error(w, "ユーザーIDが取得できませんでした", http.StatusInternalServerError)
 		return
@@ -615,7 +584,6 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 		UserName string `json:"user_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-		// ★★★ ログ出力を追加 ★★★
 		log.Printf("エラー: リクエストボディのデコードに失敗しました: %v\n", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
@@ -629,7 +597,6 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	
 	userName := requestBody.UserName
 	if userName == "" {
-		// ユーザー名が空の場合、DBから取得を試みる
 		err := db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
 		if err != nil {
 			log.Printf("警告: DBからユーザー名の取得に失敗しました (firebase_uid: %s): %v。'名無しさん'を代用します。\n", userID, err)
@@ -658,7 +625,6 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s\n", replyID, parentPostID)
 }
 
-// repliesGetHandler はリプライの一覧を取得します
 func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
         http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
@@ -676,7 +642,6 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 		currentUserID = userID
 	}
 
-    // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
         SELECT
             p.post_id, p.user_id, p.user_name, p.content, p.image_url, p.created_at,
@@ -699,7 +664,6 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
     replies := make([]Post, 0)
     for rows.Next() {
         var p Post
-        // ★★★ Scanに &p.ImageURL を追加 ★★★
         if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
             log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -721,7 +685,6 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
-	// (geminiSuggestReplyHandler関数の内容は変更なしのため省略)
 	if r.Method != http.MethodPost {
 		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
@@ -778,14 +741,12 @@ func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// userPostsHandlerは特定のユーザーの投稿一覧を取得します
 func userPostsHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
         http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
         return
     }
 
-    // URLパスからユーザーIDを取得 (例: /api/users/ここにIDが入る/)
     pathSegments := strings.Split(r.URL.Path, "/")
     if len(pathSegments) < 4 || pathSegments[3] == "" {
         http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
@@ -795,13 +756,11 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 
     log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", userID)
 
-    // ログイン中のユーザーID（いいね判定用、今回は仮）
     currentUserID := ""
 	if userID, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = userID
 	}
 
-    // ★★★ SELECT句に p.image_url を追加 ★★★
     query := `
         SELECT
             p.post_id, p.user_id, p.user_name, p.content, p.image_url, p.created_at,
@@ -824,7 +783,6 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
     posts := make([]Post, 0)
     for rows.Next() {
         var p Post
-        // ★★★ Scanに &p.ImageURL を追加 ★★★
         if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
             log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -845,15 +803,13 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
     log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", userID)
 }
 
-// imageUploadHandler は画像を受け取りGCSにアップロードします
 func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 1. リクエストから画像ファイルを取得
-	file, _, err := r.FormFile("image") // "image"はフロントエンドから送る際のキー名
+	file, _, err := r.FormFile("image")
 	if err != nil {
 		log.Printf("画像の取得に失敗: %v", err)
 		http.Error(w, "画像の取得に失敗しました", http.StatusBadRequest)
@@ -861,7 +817,6 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 2. GCSのバケット名とクライアントを準備
 	ctx := context.Background()
 	bucketName := os.Getenv("GCS_BUCKET_NAME")
 	if bucketName == "" {
@@ -878,15 +833,10 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer client.Close()
 
-	// 3. GCSに保存する際のファイル名を生成（ULIDでユニークな名前を付ける）
-	objectName := ulid.Make().String() + ".png" // 拡張子は適宜変更
+	objectName := ulid.Make().String() + ".png"
 	
-	// 4. GCSへの書き込み準備
 	writer := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
-	// この設定で、アップロードした画像が一般公開される
-	//writer.ACL = []storage.ACLRule{{Entity: storage.AllUsers, Role: storage.RoleReader}}
 
-	// 5. ファイルをGCSにコピー（アップロード）
 	if _, err := io.Copy(writer, file); err != nil {
 		log.Printf("GCSへのファイルコピーに失敗: %v", err)
 		http.Error(w, "アップロードに失敗しました", http.StatusInternalServerError)
@@ -898,14 +848,12 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. フロントエンドに、公開された画像のURLを返す
 	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"imageUrl": publicURL})
 	log.Printf("画像アップロード成功: %s", publicURL)
 }
 
-// authMiddleware はリクエストヘッダーからIDトークンを検証するミドルウェア
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -924,13 +872,11 @@ func authMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
-		// ★★★ 鍵を "userID" という文字列から userIDKey 定数に変更 ★★★
 		ctx := context.WithValue(r.Context(), userIDKey, token.UID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// ★★★ 認証ミドルウェア（オプショナル） ★★★
 func authOptionalMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -947,30 +893,24 @@ func authOptionalMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// main関数はアプリケーションのエントリポイントです。
-// main.go の main 関数を、この内容に完全に置き換えてください
-
 func main() {
 	log.Println("main 関数を開始します...")
-	mux := http.NewServeMux() // 新しいルーター(mux)を作成
+	mux := http.NewServeMux()
 
-	// --- 認証がオプショナルなエンドポイント (ログイン状態によって結果が変わるGET系) ---
 	mux.Handle("/posts", authOptionalMiddleware(http.HandlerFunc(postsGetHandler)))
 	mux.Handle("/api/posts/replies/", authOptionalMiddleware(http.HandlerFunc(repliesGetHandler)))
 	mux.Handle("/api/users/", authOptionalMiddleware(http.HandlerFunc(userPostsHandler)))
 
-	// --- 認証が必須なエンドポイント (データの作成・変更・削除やAI利用など) ---
 	mux.Handle("/post", authMiddleware(http.HandlerFunc(postCreateHandler)))
 	mux.Handle("/api/post/image", authMiddleware(http.HandlerFunc(imageUploadHandler)))
 	mux.Handle("/api/posts/like/", authMiddleware(http.HandlerFunc(likeHandler)))
-	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler))) // ★★★ 正しい設定
+
+	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler)))
 	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
 	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
 
-	// --- 認証が不要なエンドポイント ---
 	mux.HandleFunc("/user", handler) 
 
-	// CORS設定
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{
 			"http://localhost:3000",
@@ -998,9 +938,7 @@ func main() {
 	}
 }
 
-// closeDBWithSysCall関数はOSのシグナル(SIGTERM, SIGINT)を補足し、DB接続を安全にクローズします。
 func closeDBWithSysCall() {
-	// (closeDBWithSysCall関数の内容は変更なしのため省略)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
