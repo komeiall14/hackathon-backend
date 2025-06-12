@@ -17,7 +17,7 @@
     # ★★★ 修正点: COPY元のパスに 'db/' を追加 ★★★
     COPY db/term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
     
-    # 環境変数を設定して、Goアプリケーションがファイルのフルパスを認識できるようにします。
+    # 環境変数を設定して、Goアプリケーションがファイルのフルパスを認識できるようにします。.
     # この行は前の修正から引き継いでいます。
     ENV FIREBASE_SERVICE_ACCOUNT_KEY_PATH /app/term7-459800-firebase-adminsdk-fbsvc-869b36b213.json
     
