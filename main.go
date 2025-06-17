@@ -8,10 +8,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	
 	"cloud.google.com/go/storage"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/generative-ai-go/genai"
@@ -30,6 +32,10 @@ type UserResForHTTPGet struct {
     Bio              *string `json:"bio"`               // ★ 追加
     ProfileImageURL  *string `json:"profile_image_url"` // ★ 追加
     HeaderImageURL   *string `json:"header_image_url"`  // ★ 追加
+	FollowingCount   int     `json:"following_count"`   // ▼▼▼ この行を追加
+    FollowerCount    int     `json:"follower_count"`    // ▼▼▼ この行を追加
+    IsFollowing      bool    `json:"is_following"`      // ▼▼▼ この行を追加
+    IsMe             bool    `json:"is_me"` 
 	
 }
 
@@ -45,6 +51,8 @@ type Post struct {
 	LikeCount           int     `json:"like_count"`
 	IsLikedByMe         bool    `json:"is_liked_by_me"`
 	ReplyCount          int     `json:"reply_count"`
+	RetweetCount        int     `json:"retweet_count"`
+	IsRetweetedByMe     bool    `json:"is_retweeted_by_me"`
 	OriginalPost        *Post   `json:"original_post,omitempty"`
 }
 
@@ -414,7 +422,6 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 // postGetHandlerは特定の1件の投稿を取得します。
 func postGetHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
-	// /api/post/{postID} という形式を想定するため、セグメントは4つ以上になる
 	if len(pathSegments) < 4 || pathSegments[3] == "" {
 		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
 		return
@@ -435,7 +442,9 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
         FROM
             posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
@@ -444,7 +453,8 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
         WHERE p.post_id = ?
     `
 
-	rows, err := db.Query(query, currentUserID, postID)
+	// ▼▼▼ 3つの?に、それぞれ対応する変数を渡します ▼▼▼
+	rows, err := db.Query(query, currentUserID, currentUserID, postID)
 	if err != nil {
 		log.Printf("エラー: db.Query (single post) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -458,12 +468,14 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
+		// ▼▼▼ Scanの最後に2つのフィールドを追加します ▼▼▼
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (single post) に失敗: %v", err)
@@ -481,7 +493,11 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 			originalPost.UserID = origUserID.String
 			if origContent.Valid { originalPost.Content = &origContent.String }
 			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
-			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.String() }
+			if origCreatedAt.Valid { 
+				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
+				// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
+				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
+			}
 			if origUserName.Valid { originalPost.UserName = origUserName.String }
 			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
@@ -507,35 +523,59 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// --- ▼▼▼ ここからが修正・追加箇所 ▼▼▼ ---
+
+	// クエリパラメータからlimitとoffsetを取得
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+
+	// デフォルト値を設定
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = 20 // デフォルトは20件
+	}
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		offset = 0 // デフォルトは0
+	}
+
+	log.Printf("投稿一覧取得リクエスト受信: limit=%d, offset=%d\n", limit, offset)
+
 	currentUserID := ""
 	if userID, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = userID
 	}
 	
-	// ↓↓↓ このクエリを修正・置換 ↓↓↓
+	// SQLクエリに LIMIT と OFFSET を追加
 	query := `
         SELECT
             p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
-            COALESCE(u.name, p.user_name) AS user_name, -- ★ 修正: u.nameがNULLでもp.user_nameを使う
-            u.profile_image_url,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
-            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
         FROM
             posts p
-        LEFT JOIN user u ON p.user_id = u.firebase_uid -- ★ 修正: JOIN を LEFT JOIN に変更
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
         WHERE
             p.parent_post_id IS NULL
         ORDER BY
             p.created_at DESC
+        LIMIT ? OFFSET ?  -- この行を追加
     `
-    // ↑↑↑ ここまで修正・置換 ↑↑↑
 
-	rows, err := db.Query(query, currentUserID)
+	// db.Queryにlimitとoffsetを渡す
+	rows, err := db.Query(query, currentUserID, currentUserID, limit, offset)
+
+	// --- ▲▲▲ ここまでが修正・追加箇所 ▲▲▲ ---
+
 	if err != nil {
 		log.Printf("エラー: db.Query (all posts) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -543,21 +583,21 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// ...これ以降のScanロジックは変更なし...
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		// ★ 修正点1: NULLになりうる全ての値を、一時的にNULL許容型で受け取る変数を準備
 		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
-		// ★ 修正点2: Scanの対象をすべて一時変数へのポインタにする
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (all posts) に失敗しました: %v", err)
@@ -565,7 +605,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// ★ 修正点3: 値が有効(Valid)な場合のみ、構造体のフィールドに値をセットする
 		if content.Valid { p.Content = &content.String }
 		if imageURL.Valid { p.ImageURL = &imageURL.String }
 		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
@@ -576,7 +615,10 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			originalPost.UserID = origUserID.String
 			if origContent.Valid { originalPost.Content = &origContent.String }
 			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
-			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.String() }
+			if origCreatedAt.Valid { 
+				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
+				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
+			}
 			if origUserName.Valid { originalPost.UserName = origUserName.String }
 			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
@@ -596,56 +638,47 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // postCreateHandlerは新しい投稿を作成します。
+// postCreateHandlerを、この内容に丸ごと置き換えてください
+
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// ★ 認証ミドルウェアからログインユーザーのFirebase UIDを安全に取得します
 	userID, ok := r.Context().Value(userIDKey).(string)
 	if !ok {
 		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
 		return
 	}
 
-	// ★ フロントエンドからは投稿内容と画像URLのみを受け取ります
 	var requestBody struct {
-		Content  string `json:"content"`
-		ImageURL string `json:"image_url,omitempty"`
+		Content        string `json:"content"`
+		ImageURL       string `json:"image_url,omitempty"`
 		OriginalPostID string `json:"original_post_id,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-		log.Printf("エラー: リクエストボディのデコードに失敗しました: %v", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	if requestBody.Content == "" && requestBody.ImageURL == "" {
-		log.Println("バリデーションエラー: 投稿内容が空です。")
+	if requestBody.Content == "" && requestBody.ImageURL == "" && requestBody.OriginalPostID == "" {
 		http.Error(w, "投稿内容が空です", http.StatusBadRequest)
 		return
 	}
 
-	// ★ DBから最新のユーザー名を取得します
 	var userName string
 	err := db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
 	if err != nil {
-		log.Printf("DBからユーザー名の取得に失敗: %v。'名無しさん'を代用します。", err)
 		userName = "名無しさん"
 	}
 
-	// main.go の postCreateHandler 内
-
-	var imageUrlToSave, originalPostIdToSave sql.NullString // originalPostIdToSave を追加
-
+	var imageUrlToSave, originalPostIdToSave sql.NullString
 	if requestBody.ImageURL != "" {
 		imageUrlToSave.String = requestBody.ImageURL
 		imageUrlToSave.Valid = true
 	}
-
-	// ★ 以下のIF文を追加
 	if requestBody.OriginalPostID != "" {
 		originalPostIdToSave.String = requestBody.OriginalPostID
 		originalPostIdToSave.Valid = true
@@ -653,27 +686,74 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 
 	postID := ulid.Make().String()
 
-	// ★ INSERT文を修正
 	_, err = db.Exec(
-		// "INSERT INTO posts (post_id, user_id, user_name, content, image_url) VALUES (?, ?, ?, ?, ?)", // 修正前
-		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, original_post_id) VALUES (?, ?, ?, ?, ?, ?)", // 修正後
-		postID,
-		userID,
-		userName,
-		requestBody.Content,
-		imageUrlToSave,
-		originalPostIdToSave, // originalPostIdToSave を追加
+		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, original_post_id) VALUES (?, ?, ?, ?, ?, ?)",
+		postID, userID, userName, requestBody.Content, imageUrlToSave, originalPostIdToSave,
 	)
-
 	if err != nil {
 		log.Printf("エラー: postsテーブルへのINSERTに失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
+	// ▼▼▼ 作成した投稿の完全なデータを取得して返すロジック ▼▼▼
+	var createdPost Post
+	query := `
+        SELECT
+            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+			(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+			EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+        FROM posts p
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        WHERE p.post_id = ?
+    `
+	row := db.QueryRow(query, userID, userID, postID)
+
+	var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
+	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+	var origCreatedAt sql.NullTime
+
+	err = row.Scan(
+		&createdPost.PostID, &createdPost.UserID, &content, &imageURL, &createdPost.CreatedAt, &resOriginalPostID,
+		&createdPost.UserName, &userProfileImageURL,
+		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+		&origUserName, &origUserProfileImageURL,
+		&createdPost.LikeCount, &createdPost.IsLikedByMe, &createdPost.ReplyCount,
+		&createdPost.RetweetCount, &createdPost.IsRetweetedByMe,
+	)
+	if err != nil {
+		log.Printf("作成された投稿の再取得に失敗: %v。post_idのみ返します。", err)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
+		return
+	}
+
+	if content.Valid { createdPost.Content = &content.String }
+	if imageURL.Valid { createdPost.ImageURL = &imageURL.String }
+	if userProfileImageURL.Valid { createdPost.UserProfileImageURL = &userProfileImageURL.String }
+	if resOriginalPostID.Valid {
+		var originalPostData Post
+		originalPostData.PostID = origPostID.String
+		originalPostData.UserID = origUserID.String
+		if origContent.Valid { originalPostData.Content = &origContent.String }
+		if origImageURL.Valid { originalPostData.ImageURL = &origImageURL.String }
+		if origCreatedAt.Valid { originalPostData.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+		if origUserName.Valid { originalPostData.UserName = origUserName.String }
+		if origUserProfileImageURL.Valid { originalPostData.UserProfileImageURL = &origUserProfileImageURL.String }
+		createdPost.OriginalPost = &originalPostData
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	log.Printf("投稿作成成功: post_id=%s", postID)
-	json.NewEncoder(w).Encode(map[string]string{"post_id": postID})
+	json.NewEncoder(w).Encode(createdPost)
 }
 
 func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -964,6 +1044,8 @@ func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
 
 // main.go
 
+// userPostsHandlerを、この内容に丸ごと置き換えてください
+
 func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
@@ -983,19 +1065,26 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	if id, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = id
 	}
-	// ★ 修正点: SQLクエリをLEFT JOINを使ったものに変更
+	
 	query := `
         SELECT
-            p.post_id, p.user_id, COALESCE(u.name, p.user_name), u.profile_image_url, p.content, p.image_url, p.created_at,
+            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
-        WHERE p.user_id = ? AND p.parent_post_id IS NULL
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        WHERE p.user_id = ? -- ★★★ ここの条件を変更し、リツイートも取得対象に含めます ★★★
         ORDER BY p.created_at DESC
     `
-	rows, err := db.Query(query, currentUserID, userID)
+	rows, err := db.Query(query, currentUserID, currentUserID, userID)
 	if err != nil {
 		log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1006,11 +1095,42 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		// ★ 修正点: Scanの対象に &p.UserProfileImageURL を追加
-		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.UserProfileImageURL, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
+		)
+		if err != nil {
 			log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
+		}
+
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+
+		if originalPostID.Valid {
+			var originalPost Post
+			originalPost.PostID = origPostID.String
+			originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }
+			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { 
+				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
+				// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
+				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
+			}
+			if origUserName.Valid { originalPost.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
+			p.OriginalPost = &originalPost
 		}
 		posts = append(posts, p)
 	}
@@ -1025,7 +1145,6 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 	log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", userID)
 }
-
 
 func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1117,72 +1236,66 @@ func authOptionalMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// getUserProfileHandlerは特定のユーザーの完全なプロフィール情報を取得します。
+// main.go の getUserProfileHandler 関数をこれで置き換えてください
+
+// main.go の getUserProfileHandler 関数をこれで置き換えてください
 func getUserProfileHandler(w http.ResponseWriter, r *http.Request) {
-	pathSegments := strings.Split(r.URL.Path, "/")
-	if len(pathSegments) < 4 {
-		http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
-		return
-	}
-	firebaseUID := pathSegments[3]
+    pathSegments := strings.Split(r.URL.Path, "/")
+    if len(pathSegments) < 4 {
+        http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
+        return
+    }
+    profileUserID := pathSegments[3] // プロフィールページのユーザーID
 
-	var u UserResForHTTPGet
-	var age sql.NullInt64
-	var firebaseUIDFromDB, bio, profileImageURL, headerImageURL sql.NullString
+    // 現在ログインしているユーザーのIDを取得（ログインしていない場合は空文字）
+    currentUserID := ""
+    if userID, ok := r.Context().Value(userIDKey).(string); ok {
+        currentUserID = userID
+    }
 
-	err := db.QueryRow("SELECT id, name, age, firebase_uid, bio, profile_image_url, header_image_url FROM user WHERE firebase_uid = ?", firebaseUID).Scan(
-		&u.Id,
-		&u.Name,
-		&age,
-		&firebaseUIDFromDB,
-		&bio,
-		&profileImageURL,
-		&headerImageURL,
-	)
+    var u UserResForHTTPGet
+    var age sql.NullInt64
+    var firebaseUIDFromDB, bio, profileImageURL, headerImageURL sql.NullString
 
-	if err == sql.ErrNoRows {
-		http.Error(w, "ユーザーが見つかりません", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		log.Printf("ユーザープロフィールの取得エラー: %v", err)
-		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
-		return
-	}
+    // SQLクエリに、フォロー数・フォロワー数・フォロー状態の取得ロジックを追加
+    query := `
+        SELECT
+            id, name, age, firebase_uid, bio, profile_image_url, header_image_url,
+            (SELECT COUNT(*) FROM follows WHERE follower_id = user.firebase_uid) AS following_count,
+            (SELECT COUNT(*) FROM follows WHERE following_id = user.firebase_uid) AS follower_count,
+            EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND following_id = user.firebase_uid) AS is_following
+        FROM user
+        WHERE firebase_uid = ?
+    `
+    // 最初の?にログインユーザーID、2番目の?にプロフィールユーザーIDを渡す
+    err := db.QueryRow(query, currentUserID, profileUserID).Scan(
+        &u.Id, &u.Name, &age, &firebaseUIDFromDB, &bio, &profileImageURL, &headerImageURL,
+        &u.FollowingCount, &u.FollowerCount, &u.IsFollowing,
+    )
 
-	if age.Valid {
-		ageInt := int(age.Int64)
-		u.Age = &ageInt
-	}
-	if firebaseUIDFromDB.Valid {
-		u.FirebaseUID = &firebaseUIDFromDB.String
-	}
-	if bio.Valid {
-		u.Bio = &bio.String
-	}
-	if profileImageURL.Valid {
-		u.ProfileImageURL = &profileImageURL.String
-	}
-	if headerImageURL.Valid {
-		u.HeaderImageURL = &headerImageURL.String
-	}
+    if err == sql.ErrNoRows {
+        http.Error(w, "ユーザーが見つかりません", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        log.Printf("ユーザープロフィールの取得エラー: %v", err)
+        http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+        return
+    }
 
-	// ★★★ ここからが新しいデバッグログ ★★★
-	// フロントエンドに送信する直前のデータ内容をログに出力します。
-	log.Printf("--- Backend Response Debug ---")
-	log.Printf("Sending User Profile Data: %+v", u)
-	if u.FirebaseUID != nil {
-		log.Printf("FirebaseUID to be sent: %s", *u.FirebaseUID)
-	} else {
-		log.Printf("FirebaseUID to be sent is nil.")
-	}
-	// ★★★ ここまで ★★★
+    // 取得した値を構造体にマッピング
+    if age.Valid { ageInt := int(age.Int64); u.Age = &ageInt }
+    if firebaseUIDFromDB.Valid { u.FirebaseUID = &firebaseUIDFromDB.String }
+    if bio.Valid { u.Bio = &bio.String }
+    if profileImageURL.Valid { u.ProfileImageURL = &profileImageURL.String }
+    if headerImageURL.Valid { u.HeaderImageURL = &headerImageURL.String }
+    
+    // 自分自身のプロフィールかどうかを判定
+    u.IsMe = currentUserID != "" && currentUserID == profileUserID
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(u)
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(u)
 }
-
-
 
 // updateUserProfileHandlerはユーザーのプロフィール情報（名前、bio、画像URL）を更新します。
 func updateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
@@ -1217,12 +1330,33 @@ func updateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "プロフィールを更新しました。"})
 }
 
-// userRouterHandlerは /api/users/ へのリクエストをさらに振り分けます。
+// main.go の userRouterHandler 関数をこれで置き換えてください
+
+// userRouterHandlerは /api/users/ へのリクエストをURLの末尾によってさらに振り分けます。
+// main.go の userRouterHandler 関数をこれで置き換えてください
+
 func userRouterHandler(w http.ResponseWriter, r *http.Request) {
+	// 末尾が /follow の場合
+	if strings.HasSuffix(r.URL.Path, "/follow") {
+		followHandler(w, r)
+		return
+	}
+	// 末尾が /following の場合
+	if strings.HasSuffix(r.URL.Path, "/following") {
+		followingListHandler(w, r)
+		return
+	}
+	// 末尾が /followers の場合
+	if strings.HasSuffix(r.URL.Path, "/followers") {
+		followerListHandler(w, r)
+		return
+	}
+	// 末尾が /posts の場合
 	if strings.HasSuffix(r.URL.Path, "/posts") {
 		userPostsHandler(w, r)
 		return
 	}
+	// それ以外の場合は、ユーザープロフィール取得として処理
 	getUserProfileHandler(w, r)
 }
 
@@ -1294,12 +1428,10 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-func retweetHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
-		return
-	}
+// retweetHandlerはリツイートを作成します。
+// retweetHandlerを、この内容に丸ごと置き換えてください
 
+func retweetHandler(w http.ResponseWriter, r *http.Request) {
 	userID, ok := r.Context().Value(userIDKey).(string)
 	if !ok {
 		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
@@ -1313,30 +1445,375 @@ func retweetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	originalPostID := pathSegments[3]
 
-	// ★ 修正点1: リツイートするユーザーの名前をDBから取得します
-	var userName string
-	err := db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
-	if err != nil {
-		log.Printf("リツイートユーザーの名前取得に失敗: %v", err)
-		// ユーザー名が取得できなくても処理は継続できるよう、デフォルト値を設定
-		userName = "名無しさん"
-	}
+	switch r.Method {
+	case http.MethodPost:
+		var userName string
+		err := db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
+		if err != nil {
+			log.Printf("リツイートユーザーの名前取得に失敗: %v", err)
+			userName = "名無しさん"
+		}
 
-	newPostID := ulid.Make().String()
-	// ★ 修正点2: INSERT文にuser_nameカラムを追加します
-	_, err = db.Exec(
-		"INSERT INTO posts (post_id, user_id, user_name, original_post_id) VALUES (?, ?, ?, ?)",
-		newPostID, userID, userName, originalPostID,
-	)
-	if err != nil {
-		log.Printf("リツイートの作成に失敗: %v", err)
-		http.Error(w, "リツイートに失敗しました", http.StatusInternalServerError)
+		newPostID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO posts (post_id, user_id, user_name, original_post_id) VALUES (?, ?, ?, ?)",
+			newPostID, userID, userName, originalPostID,
+		)
+		if err != nil {
+			log.Printf("リツイートの作成に失敗: %v", err)
+			http.Error(w, "リツイートに失敗しました", http.StatusInternalServerError)
+			return
+		}
+
+		// ▼▼▼ 作成したリツイート投稿の完全なデータを取得して返すロジック ▼▼▼
+		var newRetweet Post
+		query := `
+			SELECT
+				p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+				COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+				orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+				orig_u.name, orig_u.profile_image_url,
+				(SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+				EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+				(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+				(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+				EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+			FROM posts p
+			LEFT JOIN user u ON p.user_id = u.firebase_uid
+			LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+			LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+			WHERE p.post_id = ?
+		`
+		row := db.QueryRow(query, userID, userID, newPostID)
+
+		var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		err = row.Scan(
+			&newRetweet.PostID, &newRetweet.UserID, &content, &imageURL, &newRetweet.CreatedAt, &resOriginalPostID,
+			&newRetweet.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&newRetweet.LikeCount, &newRetweet.IsLikedByMe, &newRetweet.ReplyCount,
+			&newRetweet.RetweetCount, &newRetweet.IsRetweetedByMe,
+		)
+		if err != nil {
+			log.Printf("作成されたリツイートの取得に失敗: %v", err)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"message": "リツイートしました"})
+			return
+		}
+
+		if content.Valid { newRetweet.Content = &content.String }
+		if imageURL.Valid { newRetweet.ImageURL = &imageURL.String }
+		if userProfileImageURL.Valid { newRetweet.UserProfileImageURL = &userProfileImageURL.String }
+		if resOriginalPostID.Valid {
+			var originalPostData Post
+			originalPostData.PostID = origPostID.String
+			originalPostData.UserID = origUserID.String
+			if origContent.Valid { originalPostData.Content = &origContent.String }
+			if origImageURL.Valid { originalPostData.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { originalPostData.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+			if origUserName.Valid { originalPostData.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPostData.UserProfileImageURL = &origUserProfileImageURL.String }
+			newRetweet.OriginalPost = &originalPostData
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(newRetweet)
+
+	case http.MethodDelete:
+		result, err := db.Exec(
+			"DELETE FROM posts WHERE original_post_id = ? AND user_id = ? AND content IS NULL",
+			originalPostID, userID,
+		)
+		if err != nil {
+			log.Printf("リツイートの取り消しに失敗: %v", err)
+			http.Error(w, "リツイートの取り消しに失敗しました", http.StatusInternalServerError)
+			return
+		}
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			log.Printf("取り消し対象のリツイートが見つかりません: original_post_id=%s, user_id=%s", originalPostID, userID)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		log.Printf("リツイート取り消し成功: user_id=%s, original_post_id=%s", userID, originalPostID)
+	default:
+		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+	}
+}
+
+// main.go にこの関数を追加
+
+// quoteRetweetsGetHandler は、特定の投稿への引用リツイートを一覧で取得します。
+func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "リツイートしました"})
+	pathSegments := strings.Split(r.URL.Path, "/")
+	// /api/posts/{id}/quote_retweets のようなパスを想定
+	if len(pathSegments) < 5 {
+		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	originalPostID := pathSegments[4]
+
+	currentUserID := ""
+	if userID, ok := r.Context().Value(userIDKey).(string); ok {
+		currentUserID = userID
+	}
+
+	// original_post_id を持ち、かつ content が空でない投稿を取得するクエリ
+	query := `
+        SELECT
+            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+        FROM posts p
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        WHERE p.original_post_id = ? AND p.content IS NOT NULL
+        ORDER BY p.created_at DESC
+    `
+
+	rows, err := db.Query(query, currentUserID, currentUserID, originalPostID)
+	if err != nil {
+		log.Printf("エラー: db.Query (quote retweets) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	posts := make([]Post, 0)
+	for rows.Next() {
+		var p Post
+		var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &resOriginalPostID,
+			&p.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
+		)
+		if err != nil {
+			log.Printf("エラー: rows.Scan (quote retweets) に失敗: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+
+		if resOriginalPostID.Valid {
+			var originalPost Post
+			originalPost.PostID = origPostID.String
+			originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }
+			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+			if origUserName.Valid { originalPost.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
+			p.OriginalPost = &originalPost
+		}
+
+		posts = append(posts, p)
+	}
+
+	bytes, err := json.Marshal(posts)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (quote retweets) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
 }
+
+// main.go にこの関数を追加
+
+// followHandler は、ユーザーのフォロー・アンフォローを処理します。
+func followHandler(w http.ResponseWriter, r *http.Request) {
+
+	// ▼▼▼ この認証チェックを関数の冒頭に追加 ▼▼▼
+	followerID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || followerID == "" {
+		http.Error(w, "この操作には認証が必要です", http.StatusUnauthorized)
+		return
+	}
+	// URLからフォロー対象のユーザーIDを取得
+	// 例: /api/users/01JXXXX/follow
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 {
+		http.Error(w, "対象のユーザーIDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	followingID := pathSegments[3] // フォローされる側のID
+
+	// 自分自身をフォローしようとした場合はエラー
+	if followerID == followingID {
+		http.Error(w, "自分自身をフォローすることはできません", http.StatusBadRequest)
+		return
+	}
+
+	// HTTPメソッドによって処理を分岐
+	switch r.Method {
+	case http.MethodPost: // フォローする
+		_, err := db.Exec("INSERT INTO follows (follower_id, following_id) VALUES (?, ?)", followerID, followingID)
+		if err != nil {
+			// 主キー制約違反（既にフォロー済み）の場合も考えられるが、ここでは汎用的なサーバーエラーとして処理
+			log.Printf("エラー: フォロー処理に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated) // 201 Created ステータスを返す
+		log.Printf("フォロー成功: follower=%s, following=%s", followerID, followingID)
+
+	case http.MethodDelete: // アンフォローする
+		_, err := db.Exec("DELETE FROM follows WHERE follower_id = ? AND following_id = ?", followerID, followingID)
+		if err != nil {
+			log.Printf("エラー: アンフォロー処理に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent) // 204 No Content ステータスを返す
+		log.Printf("アンフォロー成功: follower=%s, following=%s", followerID, followingID)
+
+	default:
+		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+	}
+}
+
+// main.go にこの2つの関数を追加
+
+// followingListHandler は、指定されたユーザーがフォローしているユーザーの一覧を返します。
+func followingListHandler(w http.ResponseWriter, r *http.Request) {
+	profileUserID, currentUserID, ok := getUserIDsFromRequest(r)
+	if !ok {
+		http.Error(w, "ユーザーIDの取得に失敗しました", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT u.id, u.name, u.age, u.firebase_uid, u.bio, u.profile_image_url, u.header_image_url,
+			(SELECT COUNT(*) FROM follows WHERE follower_id = u.firebase_uid) AS following_count,
+			(SELECT COUNT(*) FROM follows WHERE following_id = u.firebase_uid) AS follower_count,
+			EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND following_id = u.firebase_uid) AS is_following
+		FROM user u
+		INNER JOIN follows f ON u.firebase_uid = f.following_id
+		WHERE f.follower_id = ?
+	`
+	rows, err := db.Query(query, currentUserID, profileUserID)
+	if err != nil {
+		log.Printf("フォロー中のユーザー一覧取得エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	users, err := scanUsers(rows)
+	if err != nil {
+		log.Printf("ユーザーデータの読み取りエラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+
+// followerListHandler は、指定されたユーザーをフォローしているユーザーの一覧を返します。
+func followerListHandler(w http.ResponseWriter, r *http.Request) {
+	profileUserID, currentUserID, ok := getUserIDsFromRequest(r)
+	if !ok {
+		http.Error(w, "ユーザーIDの取得に失敗しました", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT u.id, u.name, u.age, u.firebase_uid, u.bio, u.profile_image_url, u.header_image_url,
+			(SELECT COUNT(*) FROM follows WHERE follower_id = u.firebase_uid) AS following_count,
+			(SELECT COUNT(*) FROM follows WHERE following_id = u.firebase_uid) AS follower_count,
+			EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND following_id = u.firebase_uid) AS is_following
+		FROM user u
+		INNER JOIN follows f ON u.firebase_uid = f.follower_id
+		WHERE f.following_id = ?
+	`
+	rows, err := db.Query(query, currentUserID, profileUserID)
+	if err != nil {
+		log.Printf("フォロワー一覧取得エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	users, err := scanUsers(rows)
+	if err != nil {
+		log.Printf("ユーザーデータの読み取りエラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+
+// 共通ロジックをまとめたヘルパー関数（もしこのような関数がなければ、これも追加してください）
+func getUserIDsFromRequest(r *http.Request) (profileUserID, currentUserID string, ok bool) {
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 4 {
+		return "", "", false
+	}
+	profileUserID = pathSegments[3]
+
+	if userID, success := r.Context().Value(userIDKey).(string); success {
+		currentUserID = userID
+	}
+	return profileUserID, currentUserID, true
+}
+
+func scanUsers(rows *sql.Rows) ([]UserResForHTTPGet, error) {
+	users := make([]UserResForHTTPGet, 0)
+	for rows.Next() {
+		var u UserResForHTTPGet
+		var age sql.NullInt64
+		var firebaseUID, bio, profileImageURL, headerImageURL sql.NullString
+		
+		err := rows.Scan(
+			&u.Id, &u.Name, &age, &firebaseUID, &bio, &profileImageURL, &headerImageURL,
+			&u.FollowingCount, &u.FollowerCount, &u.IsFollowing,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if age.Valid { ageInt := int(age.Int64); u.Age = &ageInt }
+		if firebaseUID.Valid { u.FirebaseUID = &firebaseUID.String }
+		if bio.Valid { u.Bio = &bio.String }
+		if profileImageURL.Valid { u.ProfileImageURL = &profileImageURL.String }
+		if headerImageURL.Valid { u.HeaderImageURL = &headerImageURL.String }
+		users = append(users, u)
+	}
+	return users, nil
+}
+
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
     log.Println("main 関数を開始します...")
@@ -1346,6 +1823,8 @@ func main() {
 	mux.Handle("/posts", authOptionalMiddleware(http.HandlerFunc(postsGetHandler)))
 	mux.Handle("/api/post/", authOptionalMiddleware(http.HandlerFunc(postGetHandler)))
 	mux.Handle("/api/posts/replies/", authOptionalMiddleware(http.HandlerFunc(repliesGetHandler)))
+	mux.Handle("/api/posts/quote_retweets/", authOptionalMiddleware(http.HandlerFunc(quoteRetweetsGetHandler)))
+
 	mux.Handle("/api/users/", authOptionalMiddleware(http.HandlerFunc(userRouterHandler))) // ★ ユーザー関連はここで一括処理
 	mux.Handle("/api/search", authOptionalMiddleware(http.HandlerFunc(searchHandler))) // ★ この行を追加
 
@@ -1363,6 +1842,8 @@ func main() {
 	mux.Handle("/api/login", http.HandlerFunc(loginHandler))
 
 	mux.Handle("/api/retweet/", authMiddleware(http.HandlerFunc(retweetHandler)))
+	
+
 
 	// --- 古い/userエンドポイント（互換性のために残す） ---
 	mux.HandleFunc("/user", handler)
