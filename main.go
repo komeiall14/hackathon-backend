@@ -13,7 +13,8 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	
+	"regexp"
+    "sort"
 	"cloud.google.com/go/storage"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/generative-ai-go/genai"
@@ -1814,6 +1815,71 @@ func scanUsers(rows *sql.Rows) ([]UserResForHTTPGet, error) {
 	return users, nil
 }
 
+// main.go にこの構造体と関数を追加
+
+// Trend は、トレンドのトピックと投稿数を表します。
+type Trend struct {
+    Topic string `json:"topic"`
+    Count int    `json:"count"`
+}
+
+// trendsHandler は、直近の投稿からトレンドを抽出して返します。
+func trendsHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // 直近24時間の投稿を取得（期間は調整可能）
+    rows, err := db.Query("SELECT content FROM posts WHERE created_at > NOW() - INTERVAL 24 HOUR AND content IS NOT NULL")
+    if err != nil {
+        log.Printf("トレンドデータ取得エラー: %v", err)
+        http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    // ハッシュタグを抽出するための正規表現
+    re := regexp.MustCompile(`#(\w+)`)
+    hashtagCounts := make(map[string]int)
+
+    for rows.Next() {
+        var content string
+        if err := rows.Scan(&content); err != nil {
+            continue // スキャンに失敗した行はスキップ
+        }
+        
+        // 1つの投稿から複数のハッシュタグを抽出
+        matches := re.FindAllStringSubmatch(content, -1)
+        for _, match := range matches {
+            if len(match) > 1 {
+                hashtag := strings.ToLower(match[1]) // 大文字小文字を区別しない
+                hashtagCounts[hashtag]++
+            }
+        }
+    }
+
+    // 集計結果をスライスに変換
+    trends := make([]Trend, 0, len(hashtagCounts))
+    for topic, count := range hashtagCounts {
+        trends = append(trends, Trend{Topic: topic, Count: count})
+    }
+
+    // 投稿数が多い順にソート
+    sort.Slice(trends, func(i, j int) bool {
+        return trends[i].Count > trends[j].Count
+    })
+
+    // 上位10件に制限
+    limit := 10
+    if len(trends) < limit {
+        limit = len(trends)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(trends[:limit])
+}
+
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
     log.Println("main 関数を開始します...")
@@ -1842,6 +1908,8 @@ func main() {
 	mux.Handle("/api/login", http.HandlerFunc(loginHandler))
 
 	mux.Handle("/api/retweet/", authMiddleware(http.HandlerFunc(retweetHandler)))
+
+	mux.HandleFunc("/api/trends", trendsHandler)
 	
 
 
