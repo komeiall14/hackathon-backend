@@ -524,6 +524,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	var requestBody struct {
 		Content  string `json:"content"`
 		ImageURL string `json:"image_url,omitempty"`
+		OriginalPostID string `json:"original_post_id,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
@@ -546,21 +547,33 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		userName = "名無しさん"
 	}
 
-	var imageUrlToSave sql.NullString
+	// main.go の postCreateHandler 内
+
+	var imageUrlToSave, originalPostIdToSave sql.NullString // originalPostIdToSave を追加
+
 	if requestBody.ImageURL != "" {
 		imageUrlToSave.String = requestBody.ImageURL
 		imageUrlToSave.Valid = true
 	}
 
+	// ★ 以下のIF文を追加
+	if requestBody.OriginalPostID != "" {
+		originalPostIdToSave.String = requestBody.OriginalPostID
+		originalPostIdToSave.Valid = true
+	}
+
 	postID := ulid.Make().String()
 
-	// ★ 取得した最新のuserNameと、認証済みのuserIDを使ってpostsテーブルに保存します
-	_, err = db.Exec("INSERT INTO posts (post_id, user_id, user_name, content, image_url) VALUES (?, ?, ?, ?, ?)",
+	// ★ INSERT文を修正
+	_, err = db.Exec(
+		// "INSERT INTO posts (post_id, user_id, user_name, content, image_url) VALUES (?, ?, ?, ?, ?)", // 修正前
+		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, original_post_id) VALUES (?, ?, ?, ?, ?, ?)", // 修正後
 		postID,
 		userID,
 		userName,
 		requestBody.Content,
 		imageUrlToSave,
+		originalPostIdToSave, // originalPostIdToSave を追加
 	)
 
 	if err != nil {
