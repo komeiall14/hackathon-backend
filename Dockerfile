@@ -11,7 +11,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app/
 COPY --from=builder /server .
 COPY term7-459800-firebase-adminsdk-fbsvc-869b36b213.json .
-RUN chown -R appuser:appgroup /appwew
+RUN chown -R appuser:appgroup /app
 
 USER appuser
 EXPOSE 8080
