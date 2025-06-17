@@ -1904,7 +1904,7 @@ func main() {
 	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
 	mux.Handle("/api/profile", authMiddleware(http.HandlerFunc(updateUserProfileHandler))) // ★ プロフィール更新用
 
-	// --- 新しいログイン同期エンドポイント ---
+	// --- 新しいログイン同期エンドポイント ---s
 	mux.Handle("/api/login", http.HandlerFunc(loginHandler))
 
 	mux.Handle("/api/retweet/", authMiddleware(http.HandlerFunc(retweetHandler)))
