@@ -411,6 +411,95 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "ログイン成功"})
 }
 // main.go
+// postGetHandlerは特定の1件の投稿を取得します。
+func postGetHandler(w http.ResponseWriter, r *http.Request) {
+	pathSegments := strings.Split(r.URL.Path, "/")
+	// /api/post/{postID} という形式を想定するため、セグメントは4つ以上になる
+	if len(pathSegments) < 4 || pathSegments[3] == "" {
+		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	postID := pathSegments[3]
+
+	currentUserID := ""
+	if userID, ok := r.Context().Value(userIDKey).(string); ok {
+		currentUserID = userID
+	}
+
+	query := `
+        SELECT
+            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name,
+            u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+        FROM
+            posts p
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        WHERE p.post_id = ?
+    `
+
+	rows, err := db.Query(query, currentUserID, postID)
+	if err != nil {
+		log.Printf("エラー: db.Query (single post) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var p Post
+		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+		)
+		if err != nil {
+			log.Printf("エラー: rows.Scan (single post) に失敗: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+
+		if originalPostID.Valid {
+			var originalPost Post
+			originalPost.PostID = origPostID.String
+			originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }
+			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.String() }
+			if origUserName.Valid { originalPost.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
+			p.OriginalPost = &originalPost
+		}
+		
+		bytes, err := json.Marshal(p)
+		if err != nil {
+			log.Printf("エラー: json.Marshal (single post) に失敗: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(bytes)
+
+	} else {
+		http.Error(w, "投稿が見つかりません", http.StatusNotFound)
+	}
+}
 
 func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1255,6 +1344,7 @@ func main() {
 
 	// --- 認証がオプショナルなエンドポイント ---
 	mux.Handle("/posts", authOptionalMiddleware(http.HandlerFunc(postsGetHandler)))
+	mux.Handle("/api/post/", authOptionalMiddleware(http.HandlerFunc(postGetHandler)))
 	mux.Handle("/api/posts/replies/", authOptionalMiddleware(http.HandlerFunc(repliesGetHandler)))
 	mux.Handle("/api/users/", authOptionalMiddleware(http.HandlerFunc(userRouterHandler))) // ★ ユーザー関連はここで一括処理
 	mux.Handle("/api/search", authOptionalMiddleware(http.HandlerFunc(searchHandler))) // ★ この行を追加
