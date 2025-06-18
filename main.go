@@ -82,6 +82,88 @@ var firebaseAuth *auth.Client
 type contextKey string
 const userIDKey contextKey = "userID"
 
+// main.go の型定義あたりに追加
+
+type NotificationResponse struct {
+	ID        string    `json:"id"`
+	Type      string    `json:"type"`
+	Actor     UserResForHTTPGet `json:"actor"` // アクションを起こしたユーザーの情報
+	EntityID  *string   `json:"entity_id"`
+	IsRead    bool      `json:"is_read"`
+	CreatedAt string `json:"created_at"`
+}
+
+// main.go に以下の2つのハンドラを新規追加
+
+func getNotificationsHandler(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	query := `
+		SELECT n.id, n.type, n.entity_id, n.is_read, n.created_at,
+			   u.firebase_uid, u.name, u.profile_image_url
+		FROM notifications n
+		JOIN user u ON n.actor_id = u.firebase_uid
+		WHERE n.recipient_id = ?
+		ORDER BY n.created_at DESC
+		LIMIT 50
+	`
+	rows, err := db.Query(query, userID)
+	if err != nil {
+		log.Printf("通知の取得エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	notifications := make([]NotificationResponse, 0)
+	for rows.Next() {
+		var n NotificationResponse
+		var entityID sql.NullString
+		var actorFirebaseUID, actorName, actorProfileImageURL sql.NullString
+
+		err := rows.Scan(&n.ID, &n.Type, &entityID, &n.IsRead, &n.CreatedAt,
+			&actorFirebaseUID, &actorName, &actorProfileImageURL)
+		if err != nil {
+			log.Printf("通知データの読み取りエラー: %v", err)
+			continue
+		}
+		if entityID.Valid { n.EntityID = &entityID.String }
+		if actorFirebaseUID.Valid { n.Actor.FirebaseUID = &actorFirebaseUID.String }
+		if actorName.Valid { n.Actor.Name = actorName.String }
+		if actorProfileImageURL.Valid { n.Actor.ProfileImageURL = &actorProfileImageURL.String }
+		
+		notifications = append(notifications, n)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(notifications)
+}
+
+func markNotificationsAsReadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみ許可", http.StatusMethodNotAllowed)
+		return
+	}
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	_, err := db.Exec("UPDATE notifications SET is_read = TRUE WHERE recipient_id = ?", userID)
+	if err != nil {
+		log.Printf("通知の既読化エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func init() {
 	log.Println("アプリケーション初期化処理を開始します...")
 	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
@@ -855,6 +937,27 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+
+		var postAuthorID string
+		// いいねされた投稿の作者を取得
+		err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
+		if err != nil {
+			log.Printf("投稿の作者取得エラー: %v", err)
+			// 通知は失敗してもいいね自体は成功しているので、処理は継続
+		} else {
+			// 自分自身の投稿にいいねした場合は通知しない
+			if postAuthorID != userID {
+				notificationID := ulid.Make().String()
+				_, err := db.Exec(
+					"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'like', ?)",
+					notificationID, postAuthorID, userID, postID,
+				)
+				if err != nil {
+					log.Printf("いいね通知の作成エラー: %v", err)
+				}
+			}
+		}
+
 		w.WriteHeader(http.StatusCreated)
 		log.Printf("いいね成功: user_id=%s, post_id=%s", userID, postID)
 
@@ -935,6 +1038,23 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+
+	var parentPostAuthorID string
+    err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", parentPostID).Scan(&parentPostAuthorID)
+    if err != nil {
+        log.Printf("リプライ先の投稿作者取得エラー: %v", err)
+    } else {
+        if parentPostAuthorID != userID {
+            notificationID := ulid.Make().String()
+            _, err := db.Exec(
+                "INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
+                notificationID, parentPostAuthorID, userID, parentPostID,
+            )
+            if err != nil {
+                log.Printf("リプライ通知の作成エラー: %v", err)
+            }
+        }
+    }
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"reply_id": replyID})
@@ -1701,6 +1821,16 @@ func followHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+
+		notificationID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO notifications (id, recipient_id, actor_id, type) VALUES (?, ?, ?, 'follow')",
+			notificationID, followingID, followerID,
+		)
+		if err != nil {
+			log.Printf("フォロー通知の作成エラー: %v", err)
+		}
+
 		w.WriteHeader(http.StatusCreated) // 201 Created ステータスを返す
 		log.Printf("フォロー成功: follower=%s, following=%s", followerID, followingID)
 
@@ -2290,6 +2420,28 @@ func startConversationHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"conversation_id": newConversationID})
 }
 
+// main.go にこのハンドラを新規追加してください
+
+func getUnreadNotificationCountHandler(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	var count int
+	// is_readがFALSEのレコードの数をカウントする
+	err := db.QueryRow("SELECT COUNT(*) FROM notifications WHERE recipient_id = ? AND is_read = FALSE", userID).Scan(&count)
+	if err != nil {
+		log.Printf("未読通知件数の取得エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
+}
+
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
     log.Println("main 関数を開始します...")
@@ -2313,6 +2465,10 @@ func main() {
 	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
 	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
 	mux.Handle("/api/profile", authMiddleware(http.HandlerFunc(updateUserProfileHandler))) // ★ プロフィール更新用
+	mux.Handle("/api/notifications", authMiddleware(http.HandlerFunc(getNotificationsHandler)))
+	mux.Handle("/api/notifications/unread-count", authMiddleware(http.HandlerFunc(getUnreadNotificationCountHandler)))
+    mux.Handle("/api/notifications/read", authMiddleware(http.HandlerFunc(markNotificationsAsReadHandler)))
+
 	mux.Handle("/api/conversations", authMiddleware(http.HandlerFunc(getConversationsHandler)))
 	mux.Handle("/api/conversations/", authMiddleware(http.HandlerFunc(conversationRouterHandler)))
 	mux.Handle("/api/new-conversation", authMiddleware(http.HandlerFunc(startConversationHandler)))
