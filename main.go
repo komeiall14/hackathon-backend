@@ -16,6 +16,7 @@ import (
 	"regexp"
     "sort"
 	"cloud.google.com/go/storage"
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/generative-ai-go/genai"
 	"github.com/joho/godotenv"
@@ -54,6 +55,7 @@ type Post struct {
 	ReplyCount          int     `json:"reply_count"`
 	RetweetCount        int     `json:"retweet_count"`
 	IsRetweetedByMe     bool    `json:"is_retweeted_by_me"`
+	IsBookmarkedByMe    bool    `json:"is_bookmarked_by_me"` 
 	OriginalPost        *Post   `json:"original_post,omitempty"`
 }
 
@@ -546,7 +548,8 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM
             posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
@@ -556,7 +559,7 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
     `
 
 	// ▼▼▼ 3つの?に、それぞれ対応する変数を渡します ▼▼▼
-	rows, err := db.Query(query, currentUserID, currentUserID, postID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, postID)
 	if err != nil {
 		log.Printf("エラー: db.Query (single post) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -578,6 +581,7 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (single post) に失敗: %v", err)
@@ -660,7 +664,8 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM
             posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
@@ -674,7 +679,7 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     `
 
 	// db.Queryにlimitとoffsetを渡す
-	rows, err := db.Query(query, currentUserID, currentUserID, limit, offset)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, limit, offset)
 
 	// --- ▲▲▲ ここまでが修正・追加箇所 ▲▲▲ ---
 
@@ -700,6 +705,7 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (all posts) に失敗しました: %v", err)
@@ -810,14 +816,15 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
 			(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-			EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+			EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
         WHERE p.post_id = ?
     `
-	row := db.QueryRow(query, userID, userID, postID)
+	row := db.QueryRow(query, userID, userID, userID, postID)
 
 	var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
@@ -830,6 +837,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		&origUserName, &origUserProfileImageURL,
 		&createdPost.LikeCount, &createdPost.IsLikedByMe, &createdPost.ReplyCount,
 		&createdPost.RetweetCount, &createdPost.IsRetweetedByMe,
+		&createdPost.IsBookmarkedByMe,
 	)
 	if err != nil {
 		log.Printf("作成された投稿の再取得に失敗: %v。post_idのみ返します。", err)
@@ -913,6 +921,8 @@ func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// main.go の likeHandler 関数をこれで置き換えてください
+
 func likeHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
 	if len(pathSegments) < 5 {
@@ -932,11 +942,25 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		likeID := ulid.Make().String()
 		_, err := db.Exec("INSERT INTO likes (like_id, user_id, post_id) VALUES (?, ?, ?)", likeID, userID, postID)
+		
+		// ▼▼▼ エラーハンドリングをこのブロックに修正 ▼▼▼
 		if err != nil {
+			// エラーがmysqlの特定のエラーかチェック
+			if mysqlErr, ok := err.(*mysql.MySQLError); ok {
+				// エラーコード1062は「Duplicate entry」(重複エントリ)
+				if mysqlErr.Number == 1062 {
+					// 既にいいねされているので、エラーとせず正常なレスポンスを返す
+					log.Printf("いいね済みのためスキップ: user_id=%s, post_id=%s", userID, postID)
+					w.WriteHeader(http.StatusConflict) // 409 Conflict: 既にリソースが存在する
+					return
+				}
+			}
+			// その他のDBエラーは500として処理
 			log.Printf("エラー: db.Exec (insert like) に失敗しました: %v", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+		// ▲▲▲ ここまで修正 ▲▲▲
 
 		var postAuthorID string
 		// いいねされた投稿の作者を取得
@@ -975,7 +999,6 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
 	}
 }
-
 func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		log.Printf("メソッド不允许: /api/posts/reply/ に %s メソッドでアクセスがありました\n", r.Method)
@@ -1086,14 +1109,15 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
             p.post_id, p.user_id, COALESCE(u.name, p.user_name), u.profile_image_url, p.content, p.image_url, p.created_at,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         WHERE p.parent_post_id = ?
         ORDER BY p.created_at ASC
     `
 
-    rows, err := db.Query(query, currentUserID, parentPostID)
+    rows, err := db.Query(query, currentUserID, currentUserID, parentPostID)
     if err != nil {
         log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
         http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1105,7 +1129,7 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
     for rows.Next() {
         var p Post
 		// ★ 修正点: Scanの対象に &p.UserProfileImageURL を追加
-        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.UserProfileImageURL, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.UserProfileImageURL, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount, &p.IsBookmarkedByMe); err != nil {
             log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
             return
@@ -1216,7 +1240,8 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
@@ -1224,7 +1249,7 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
         WHERE p.user_id = ? -- ★★★ ここの条件を変更し、リツイートも取得対象に含めます ★★★
         ORDER BY p.created_at DESC
     `
-	rows, err := db.Query(query, currentUserID, currentUserID, userID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, userID)
 	if err != nil {
 		log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1246,6 +1271,7 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
@@ -1500,13 +1526,14 @@ func userRouterHandler(w http.ResponseWriter, r *http.Request) {
 	getUserProfileHandler(w, r)
 }
 
+// main.go の searchHandler 関数をこれで置き換えてください
+
 func searchHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// URLクエリから検索キーワード'q'を取得
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		http.Error(w, "検索キーワードが指定されていません", http.StatusBadRequest)
@@ -1514,31 +1541,40 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("検索リクエスト受信: キーワード=%s", query)
-	searchTerm := "%" + query + "%" // LIKE検索用のワイルドカードを追加
+	searchTerm := "%" + query + "%"
 
 	currentUserID := ""
 	if userID, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = userID
 	}
 
-	// posts.content または user.name がキーワードに一致する投稿を検索するSQL
+	// ★ 修正: リツイート情報、お気に入り情報などを全て取得するクエリに修正
 	sqlQuery := `
         SELECT
-            p.post_id, p.user_id, COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url, p.content, p.image_url, p.created_at,
+            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+            EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM
             posts p
         LEFT JOIN
             user u ON p.user_id = u.firebase_uid
+		LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
         WHERE
             p.parent_post_id IS NULL AND (p.content LIKE ? OR u.name LIKE ?)
         ORDER BY
             p.created_at DESC
     `
 
-	rows, err := db.Query(sqlQuery, currentUserID, searchTerm, searchTerm)
+	// ★ 修正: クエリの'?'の数に合わせて引数を修正
+	rows, err := db.Query(sqlQuery, currentUserID, currentUserID, currentUserID, searchTerm, searchTerm)
 	if err != nil {
 		log.Printf("エラー: db.Query (search) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1549,11 +1585,42 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.UserProfileImageURL, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount); err != nil {
+		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		// ★ 修正: クエリで取得する全ての列を受け取るようにScanの引数を修正
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
+		)
+		if err != nil {
 			log.Printf("エラー: rows.Scan (search) に失敗しました: %v", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+
+		if originalPostID.Valid {
+			var originalPost Post
+			originalPost.PostID = origPostID.String
+			originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }
+			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+			if origUserName.Valid { originalPost.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
+			p.OriginalPost = &originalPost
+		}
+
 		posts = append(posts, p)
 	}
 
@@ -1617,14 +1684,16 @@ func retweetHandler(w http.ResponseWriter, r *http.Request) {
 				EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 				(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
 				(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-				EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+				EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+				EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
 			FROM posts p
 			LEFT JOIN user u ON p.user_id = u.firebase_uid
 			LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
 			LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
 			WHERE p.post_id = ?
 		`
-		row := db.QueryRow(query, userID, userID, newPostID)
+		row := db.QueryRow(query, userID, userID, userID, newPostID)
+
 
 		var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
@@ -1637,6 +1706,7 @@ func retweetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&newRetweet.LikeCount, &newRetweet.IsLikedByMe, &newRetweet.ReplyCount,
 			&newRetweet.RetweetCount, &newRetweet.IsRetweetedByMe,
+			&newRetweet.IsBookmarkedByMe,
 		)
 		if err != nil {
 			log.Printf("作成されたリツイートの取得に失敗: %v", err)
@@ -1718,7 +1788,8 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
@@ -1727,7 +1798,7 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY p.created_at DESC
     `
 
-	rows, err := db.Query(query, currentUserID, currentUserID, originalPostID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, originalPostID)
 	if err != nil {
 		log.Printf("エラー: db.Query (quote retweets) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1749,6 +1820,7 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (quote retweets) に失敗: %v", err)
@@ -2442,6 +2514,134 @@ func getUnreadNotificationCountHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }
 
+// main.go の getBookmarksHandler をこれで置き換えてください
+
+func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
+	currentUserID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	query := `
+        SELECT
+            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+            TRUE AS is_bookmarked_by_me -- ★ ブックマーク一覧なので常にtrue
+        FROM posts p
+        JOIN bookmarks b ON p.post_id = b.post_id -- ★ JOINでブックマークされた投稿に絞る
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        WHERE b.user_id = ? -- ★ ログインユーザーのブックマークのみ
+        ORDER BY b.created_at DESC
+    `
+
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID)
+	if err != nil {
+		log.Printf("ブックマーク投稿の取得エラー: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// ここから先のrows.Next()とScanのループは、postsGetHandlerと全く同じです。
+	// postsGetHandlerからコピーして貼り付けてください。
+	posts := make([]Post, 0)
+	for rows.Next() {
+		var p Post
+		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
+		)
+		if err != nil {
+			log.Printf("エラー: rows.Scan (bookmarks) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+		if originalPostID.Valid {
+			var originalPost Post
+			// ... (original postの詰め替え処理) ...
+			p.OriginalPost = &originalPost
+		}
+
+		posts = append(posts, p)
+	}
+
+	bytes, err := json.Marshal(posts)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (bookmarks) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
+}
+
+// main.go にこの関数を追加してください
+
+// bookmarkHandler は投稿のお気に入り登録・解除を処理します
+// main.go の bookmarkHandler 関数をこれで置き換えてください
+
+// bookmarkHandler は投稿のお気に入り登録・解除を処理します
+func bookmarkHandler(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	pathSegments := strings.Split(r.URL.Path, "/")
+	// URLの形式が /api/posts/bookmark/{post_id} であることを想定
+	if len(pathSegments) < 5 {
+		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	// ★★★ 修正点: [3]から[4]に変更 ★★★
+	postID := pathSegments[4]
+
+	switch r.Method {
+	case http.MethodPost:
+		_, err := db.Exec("INSERT INTO bookmarks (user_id, post_id) VALUES (?, ?)", userID, postID)
+		if err != nil {
+			log.Printf("ブックマークの作成エラー: %v", err)
+			http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	case http.MethodDelete:
+		_, err := db.Exec("DELETE FROM bookmarks WHERE user_id = ? AND post_id = ?", userID, postID)
+		if err != nil {
+			log.Printf("ブックマークの削除エラー: %v", err)
+			http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+	}
+}
+
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
     log.Println("main 関数を開始します...")
@@ -2463,6 +2663,9 @@ func main() {
 	mux.Handle("/api/posts/like/", authMiddleware(http.HandlerFunc(likeHandler)))
 	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler)))
 	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
+	mux.Handle("/api/posts/bookmark/", authMiddleware(http.HandlerFunc(bookmarkHandler)))
+    mux.Handle("/api/bookmarks", authMiddleware(http.HandlerFunc(getBookmarksHandler)))
+
 	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
 	mux.Handle("/api/profile", authMiddleware(http.HandlerFunc(updateUserProfileHandler))) // ★ プロフィール更新用
 	mux.Handle("/api/notifications", authMiddleware(http.HandlerFunc(getNotificationsHandler)))
