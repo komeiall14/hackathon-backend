@@ -57,6 +57,25 @@ type Post struct {
 	OriginalPost        *Post   `json:"original_post,omitempty"`
 }
 
+// main.go
+
+// ... Post 構造体の下あたりに追加 ...
+
+type Message struct {
+    ID            string `json:"id"`
+    ConversationID string `json:"conversation_id"`
+    SenderID      string `json:"sender_id"`
+    Content       string `json:"content"`
+    CreatedAt     string `json:"created_at"`
+}
+
+type Conversation struct {
+    ConversationID      string             `json:"conversation_id"`
+    OtherUser           UserResForHTTPGet  `json:"other_user"`
+    LastMessage         *Message           `json:"last_message"`
+    UpdatedAt           string             `json:"updated_at"`
+}
+
 var db *sql.DB
 var firebaseAuth *auth.Client
 
@@ -1879,6 +1898,397 @@ func trendsHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(trends[:limit])
 }
+// main.go にこの関数を追加
+
+// getConversationsHandlerは、ログインユーザーが参加している会話の一覧を返します。
+func getConversationsHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
+
+    currentUserID, ok := r.Context().Value(userIDKey).(string)
+    if !ok || currentUserID == "" {
+        http.Error(w, "この操作には認証が必要です", http.StatusUnauthorized)
+        return
+    }
+
+    // ユーザーが参加している会話、その会話の相手、最新のメッセージを取得する複雑なクエリ
+    query := `
+        SELECT
+            c.id AS conversation_id,
+            c.updated_at,
+            other_user.firebase_uid,
+            other_user.name,
+            other_user.profile_image_url,
+            last_msg.id,
+            last_msg.sender_id,
+            last_msg.content,
+            last_msg.created_at
+        FROM conversations c
+        -- 自分が参加している会話IDを見つける
+        JOIN conversation_participants my_cp ON c.id = my_cp.conversation_id
+        -- 同じ会話に参加している、自分以外の相手を見つける
+        JOIN conversation_participants other_cp ON c.id = other_cp.conversation_id AND my_cp.user_id != other_cp.user_id
+        -- 相手のユーザー情報を取得
+        JOIN user other_user ON other_cp.user_id = other_user.firebase_uid
+        -- 各会話の最新のメッセージをLEFT JOINで取得 (メッセージがない会話も考慮)
+        LEFT JOIN (
+            SELECT 
+                m.id, m.conversation_id, m.sender_id, m.content, m.created_at,
+                ROW_NUMBER() OVER(PARTITION BY m.conversation_id ORDER BY m.created_at DESC) as rn
+            FROM messages m
+        ) AS last_msg ON c.id = last_msg.conversation_id AND last_msg.rn = 1
+        WHERE my_cp.user_id = ?
+        ORDER BY c.updated_at DESC;
+    `
+
+    rows, err := db.Query(query, currentUserID)
+    if err != nil {
+        log.Printf("会話一覧の取得エラー: %v", err)
+        http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    conversations := make([]Conversation, 0)
+    for rows.Next() {
+        var conv Conversation
+        var lastMsg Message
+        var otherUser UserResForHTTPGet
+        var otherUserFirebaseUID, otherUserName, lastMsgID, lastMsgSenderID, lastMsgContent sql.NullString
+        var otherUserProfileImgURL sql.NullString
+        var lastMsgCreatedAt sql.NullTime
+
+        err := rows.Scan(
+            &conv.ConversationID,
+            &conv.UpdatedAt,
+            &otherUserFirebaseUID,
+            &otherUserName,
+            &otherUserProfileImgURL,
+            &lastMsgID,
+            &lastMsgSenderID,
+            &lastMsgContent,
+            &lastMsgCreatedAt,
+        )
+        if err != nil {
+            log.Printf("会話データの読み取りエラー: %v", err)
+            http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+            return
+        }
+
+        // 他のユーザー情報をセット
+        if otherUserFirebaseUID.Valid { otherUser.FirebaseUID = &otherUserFirebaseUID.String }
+        if otherUserName.Valid { otherUser.Name = otherUserName.String }
+        if otherUserProfileImgURL.Valid { otherUser.ProfileImageURL = &otherUserProfileImgURL.String }
+        conv.OtherUser = otherUser
+
+        // 最新メッセージがあればセット
+        if lastMsgID.Valid {
+            lastMsg.ID = lastMsgID.String
+            lastMsg.SenderID = lastMsgSenderID.String
+            lastMsg.Content = lastMsgContent.String
+            lastMsg.CreatedAt = lastMsgCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
+            conv.LastMessage = &lastMsg
+        }
+
+        conversations = append(conversations, conv)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(conversations)
+}
+
+// main.go にこの関数を追加
+
+// getMessagesHandlerは、特定の会話内のメッセージ一覧を返します。
+func getMessagesHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+        return
+    }
+
+    currentUserID, ok := r.Context().Value(userIDKey).(string)
+    if !ok || currentUserID == "" {
+        http.Error(w, "この操作には認証が必要です", http.StatusUnauthorized)
+        return
+    }
+
+    // URLから会話IDを取得 (例: /api/conversations/{conv_id}/messages)
+    pathWithoutSuffix := strings.TrimSuffix(r.URL.Path, "/messages")
+    pathSegments := strings.Split(pathWithoutSuffix, "/")
+    if len(pathSegments) < 4 {
+        http.Error(w, "会話IDが指定されていません", http.StatusBadRequest)
+        return
+    }
+    conversationID := pathSegments[3]
+
+    // セキュリティチェック：ログインユーザーがこの会話の参加者であることを確認
+    var participantCount int
+    err := db.QueryRow("SELECT COUNT(*) FROM conversation_participants WHERE conversation_id = ? AND user_id = ?", conversationID, currentUserID).Scan(&participantCount)
+    if err != nil {
+        log.Printf("会話の参加者チェックエラー: %v", err)
+        http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+        return
+    }
+    if participantCount == 0 {
+        http.Error(w, "この会話へのアクセス権がありません", http.StatusForbidden)
+        return
+    }
+
+    // メッセージを取得
+    rows, err := db.Query("SELECT id, sender_id, content, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC", conversationID)
+    if err != nil {
+        log.Printf("メッセージ一覧の取得エラー: %v", err)
+        http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    messages := make([]Message, 0)
+    for rows.Next() {
+        var msg Message
+        msg.ConversationID = conversationID // conversation_idはクエリから取得したものを使う
+        err := rows.Scan(&msg.ID, &msg.SenderID, &msg.Content, &msg.CreatedAt)
+        if err != nil {
+            log.Printf("メッセージデータの読み取りエラー: %v", err)
+            http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+            return
+        }
+        messages = append(messages, msg)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(messages)
+}
+
+// main.go にこの関数を追加
+
+// main.go の conversationRouterHandler 関数をこの内容に置き換えてください
+
+func conversationRouterHandler(w http.ResponseWriter, r *http.Request) {
+	// 末尾が /messages の場合、メソッドによって処理を分岐
+	if strings.HasSuffix(r.URL.Path, "/messages") {
+		switch r.Method {
+		case http.MethodGet:
+			getMessagesHandler(w, r)
+		case http.MethodPost:
+			sendMessageHandler(w, r) // ★ この行を追加
+		default:
+			http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	// 今後、他の処理（例: 会話情報の取得など）を追加する場合はここに書く
+
+	http.NotFound(w, r)
+}
+// main.go にこの関数を追加
+
+// sendMessageHandler は、特定の会話に新しいメッセージを投稿します。
+func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
+	// このエンドポイントはPOSTメソッドのみを許可
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// コンテキストから送信者のユーザーIDを取得
+	senderID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || senderID == "" {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	// URLから会話IDを取得
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 {
+		http.Error(w, "会話IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	conversationID := pathSegments[3]
+
+	// リクエストボディからメッセージ内容をデコード
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "無効なリクエストボディです", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Content) == "" {
+		http.Error(w, "メッセージ内容が空です", http.StatusBadRequest)
+		return
+	}
+
+	// トランザクションを開始
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("トランザクション開始エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	// 関数終了時にロールバックを試み、エラーがあればログに出力
+	defer tx.Rollback()
+
+	// 新しいメッセージのIDを生成
+	messageID := ulid.Make().String()
+
+	// データベースにメッセージを挿入
+	_, err = tx.Exec(
+		"INSERT INTO messages (id, conversation_id, sender_id, content) VALUES (?, ?, ?, ?)",
+		messageID, conversationID, senderID, req.Content,
+	)
+	if err != nil {
+		log.Printf("メッセージの挿入エラー: %v", err)
+		http.Error(w, "メッセージの保存に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	// 会話の最終更新日時を更新
+	_, err = tx.Exec("UPDATE conversations SET updated_at = NOW() WHERE id = ?", conversationID)
+	if err != nil {
+		log.Printf("会話の更新日時変更エラー: %v", err)
+		http.Error(w, "メッセージの保存に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	// トランザクションをコミット
+	if err := tx.Commit(); err != nil {
+		log.Printf("トランザクションのコミットエラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	// フロントエンドでUIを更新するために、作成したメッセージ情報を取得して返す
+	var createdMessage Message
+	err = db.QueryRow(
+		"SELECT id, conversation_id, sender_id, content, created_at FROM messages WHERE id = ?",
+		messageID,
+	).Scan(&createdMessage.ID, &createdMessage.ConversationID, &createdMessage.SenderID, &createdMessage.Content, &createdMessage.CreatedAt)
+
+	if err != nil {
+		log.Printf("送信済みメッセージの取得エラー: %v", err)
+		// メッセージの保存自体は成功しているので、ここでは空の成功レスポンスを返す
+		w.WriteHeader(http.StatusCreated)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(createdMessage)
+}
+
+
+// main.go にこの関数を追加してください
+
+// startConversationHandler は、指定されたユーザーとの会話を開始、または既存の会話を取得します。
+func startConversationHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// リクエストを開始したユーザー（自分）のIDを取得
+	senderID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || senderID == "" {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	// リクエストボディから会話相手のIDをデコード
+	var req struct {
+		RecipientID string `json:"recipient_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "無効なリクエストボディです", http.StatusBadRequest)
+		return
+	}
+
+	recipientID := req.RecipientID
+	if recipientID == "" {
+		http.Error(w, "会話相手のIDが指定されていません", http.StatusBadRequest)
+		return
+	}
+
+	if senderID == recipientID {
+		http.Error(w, "自分自身と会話を開始することはできません", http.StatusBadRequest)
+		return
+	}
+
+	// まず、この2人だけの会話が既に存在するかどうかをチェック
+	var existingConversationID string
+	query := `
+		SELECT cp1.conversation_id
+		FROM conversation_participants AS cp1
+		JOIN conversation_participants AS cp2 ON cp1.conversation_id = cp2.conversation_id
+		WHERE cp1.user_id = ? AND cp2.user_id = ?
+		GROUP BY cp1.conversation_id
+		HAVING COUNT(cp1.conversation_id) = 1 AND (SELECT COUNT(*) FROM conversation_participants WHERE conversation_id = cp1.conversation_id) = 2
+	`
+	err := db.QueryRow(query, senderID, recipientID).Scan(&existingConversationID)
+
+	// 会話が既に存在する場合
+	if err == nil {
+		log.Printf("既存の会話が見つかりました: %s", existingConversationID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"conversation_id": existingConversationID})
+		return
+	}
+	
+	// `sql.ErrNoRows` 以外はDBエラー
+	if err != sql.ErrNoRows {
+		log.Printf("既存の会話の検索エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	//--- 会話が存在しない場合、新規作成 ---
+	log.Println("新しい会話を作成します...")
+
+	// トランザクションを開始
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("トランザクション開始エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	// 1. 新しい会話IDを生成
+	newConversationID := ulid.Make().String()
+
+	// 2. `conversations` テーブルに新しい会話を挿入
+	_, err = tx.Exec("INSERT INTO conversations (id) VALUES (?)", newConversationID)
+	if err != nil {
+		log.Printf("conversationsテーブルへの挿入エラー: %v", err)
+		http.Error(w, "会話の作成に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	// 3. `conversation_participants` テーブルに2人の参加者を追加
+	_, err = tx.Exec(
+		"INSERT INTO conversation_participants (conversation_id, user_id) VALUES (?, ?), (?, ?)",
+		newConversationID, senderID, newConversationID, recipientID,
+	)
+	if err != nil {
+		log.Printf("conversation_participantsテーブルへの挿入エラー: %v", err)
+		http.Error(w, "会話の作成に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	// トランザクションをコミット
+	if err := tx.Commit(); err != nil {
+		log.Printf("会話作成トランザクションのコミットエラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("新しい会話を正常に作成しました: %s", newConversationID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"conversation_id": newConversationID})
+}
 
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
@@ -1903,6 +2313,9 @@ func main() {
 	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
 	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
 	mux.Handle("/api/profile", authMiddleware(http.HandlerFunc(updateUserProfileHandler))) // ★ プロフィール更新用
+	mux.Handle("/api/conversations", authMiddleware(http.HandlerFunc(getConversationsHandler)))
+	mux.Handle("/api/conversations/", authMiddleware(http.HandlerFunc(conversationRouterHandler)))
+	mux.Handle("/api/new-conversation", authMiddleware(http.HandlerFunc(startConversationHandler)))
 
 	// --- 新しいログイン同期エンドポイント ---s
 	mux.Handle("/api/login", http.HandlerFunc(loginHandler))
