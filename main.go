@@ -46,16 +46,18 @@ type Post struct {
 	PostID              string  `json:"post_id"`
 	UserID              string  `json:"user_id"`
 	UserName            string  `json:"user_name"`
-	UserProfileImageURL *string `json:"user_profile_image_url"` // ポインタ型にする
-	Content             *string `json:"content"`               // ★ stringから*stringに変更
+	UserProfileImageURL *string `json:"user_profile_image_url"`
+	Content             *string `json:"content"`
 	ImageURL            *string `json:"image_url"`
+	VideoURL            *string `json:"video_url"`   // ★ この行を追加
+	MediaType           *string `json:"media_type"`  // ★ この行を追加
 	CreatedAt           string  `json:"created_at"`
 	LikeCount           int     `json:"like_count"`
 	IsLikedByMe         bool    `json:"is_liked_by_me"`
 	ReplyCount          int     `json:"reply_count"`
 	RetweetCount        int     `json:"retweet_count"`
 	IsRetweetedByMe     bool    `json:"is_retweeted_by_me"`
-	IsBookmarkedByMe    bool    `json:"is_bookmarked_by_me"` 
+	IsBookmarkedByMe    bool    `json:"is_bookmarked_by_me"`
 	OriginalPost        *Post   `json:"original_post,omitempty"`
 }
 
@@ -524,6 +526,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 }
 // main.go
 // postGetHandlerは特定の1件の投稿を取得します。
+// main.go の postGetHandler 関数をこれで置き換えてください
+
 func postGetHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
 	if len(pathSegments) < 4 || pathSegments[3] == "" {
@@ -537,9 +541,10 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 		currentUserID = userID
 	}
 
+	// ★ 修正: SELECT句に p.video_url, p.media_type を追加
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name,
             u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
@@ -558,69 +563,70 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
         WHERE p.post_id = ?
     `
 
-	// ▼▼▼ 3つの?に、それぞれ対応する変数を渡します ▼▼▼
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, postID)
+	row := db.QueryRow(query, currentUserID, currentUserID, currentUserID, postID)
+
+	if row.Err() != nil {
+        log.Printf("エラー: db.QueryRow (single post) に失敗: %v", row.Err())
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+    }
+
+	var p Post
+	var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+	var origCreatedAt sql.NullTime
+
+	// ★ 修正: Scanの引数に &videoURL, &mediaType を追加
+	err := row.Scan(
+		&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+		&p.UserName, &userProfileImageURL,
+		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+		&origUserName, &origUserProfileImageURL,
+		&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+		&p.RetweetCount, &p.IsRetweetedByMe,
+		&p.IsBookmarkedByMe,
+	)
+	
+	if err == sql.ErrNoRows {
+		http.Error(w, "投稿が見つかりません", http.StatusNotFound)
+		return
+	}
 	if err != nil {
-		log.Printf("エラー: db.Query (single post) に失敗: %v", err)
+		log.Printf("エラー: rows.Scan (single post) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
 
-	if rows.Next() {
-		var p Post
-		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
-		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
-		var origCreatedAt sql.NullTime
+	if content.Valid { p.Content = &content.String }
+	if imageURL.Valid { p.ImageURL = &imageURL.String }
+	if videoURL.Valid { p.VideoURL = &videoURL.String }
+	if mediaType.Valid { p.MediaType = &mediaType.String }
+	if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
 
-		// ▼▼▼ Scanの最後に2つのフィールドを追加します ▼▼▼
-		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
-			&p.UserName, &userProfileImageURL,
-			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
-			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.IsBookmarkedByMe,
-		)
-		if err != nil {
-			log.Printf("エラー: rows.Scan (single post) に失敗: %v", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
+	if originalPostID.Valid {
+		var originalPost Post
+		originalPost.PostID = origPostID.String
+		originalPost.UserID = origUserID.String
+		if origContent.Valid { originalPost.Content = &origContent.String }
+		if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+		if origCreatedAt.Valid { 
+			originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
+			// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
+			log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
 		}
-
-		if content.Valid { p.Content = &content.String }
-		if imageURL.Valid { p.ImageURL = &imageURL.String }
-		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
-
-		if originalPostID.Valid {
-			var originalPost Post
-			originalPost.PostID = origPostID.String
-			originalPost.UserID = origUserID.String
-			if origContent.Valid { originalPost.Content = &origContent.String }
-			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
-			if origCreatedAt.Valid { 
-				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
-				// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
-				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
-			}
-			if origUserName.Valid { originalPost.UserName = origUserName.String }
-			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
-			p.OriginalPost = &originalPost
-		}
-		
-		bytes, err := json.Marshal(p)
-		if err != nil {
-			log.Printf("エラー: json.Marshal (single post) に失敗: %v", err)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(bytes)
-
-	} else {
-		http.Error(w, "投稿が見つかりません", http.StatusNotFound)
+		if origUserName.Valid { originalPost.UserName = origUserName.String }
+		if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
+		p.OriginalPost = &originalPost
 	}
+	
+	bytes, err := json.Marshal(p)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (single post) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
 }
 
 func postsGetHandler(w http.ResponseWriter, r *http.Request) {
@@ -656,11 +662,11 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	// SQLクエリに LIMIT と OFFSET を追加
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
-            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS like_count,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
@@ -681,8 +687,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	// db.Queryにlimitとoffsetを渡す
 	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, limit, offset)
 
-	// --- ▲▲▲ ここまでが修正・追加箇所 ▲▲▲ ---
-
 	if err != nil {
 		log.Printf("エラー: db.Query (all posts) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -694,12 +698,13 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
+		// ★ 修正: Scanの引数に &videoURL, &mediaType を追加
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
@@ -712,9 +717,11 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
-
+		
 		if content.Valid { p.Content = &content.String }
 		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+		if mediaType.Valid { p.MediaType = &mediaType.String }
 		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
 
 		if originalPostID.Valid {
@@ -746,7 +753,7 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // postCreateHandlerは新しい投稿を作成します。
-// postCreateHandlerを、この内容に丸ごと置き換えてください
+// main.go の postCreateHandler 関数をこれで置き換えてください
 
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -763,6 +770,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	var requestBody struct {
 		Content        string `json:"content"`
 		ImageURL       string `json:"image_url,omitempty"`
+		VideoURL       string `json:"video_url,omitempty"`
 		OriginalPostID string `json:"original_post_id,omitempty"`
 	}
 
@@ -771,7 +779,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if requestBody.Content == "" && requestBody.ImageURL == "" && requestBody.OriginalPostID == "" {
+	if requestBody.Content == "" && requestBody.ImageURL == "" && requestBody.VideoURL == "" && requestBody.OriginalPostID == "" {
 		http.Error(w, "投稿内容が空です", http.StatusBadRequest)
 		return
 	}
@@ -782,10 +790,17 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		userName = "名無しさん"
 	}
 
-	var imageUrlToSave, originalPostIdToSave sql.NullString
+	var imageUrlToSave, videoUrlToSave, mediaTypeToSave, originalPostIdToSave sql.NullString
 	if requestBody.ImageURL != "" {
 		imageUrlToSave.String = requestBody.ImageURL
 		imageUrlToSave.Valid = true
+		mediaTypeToSave.String = "image"
+		mediaTypeToSave.Valid = true
+	} else if requestBody.VideoURL != "" {
+		videoUrlToSave.String = requestBody.VideoURL
+		videoUrlToSave.Valid = true
+		mediaTypeToSave.String = "video"
+		mediaTypeToSave.Valid = true
 	}
 	if requestBody.OriginalPostID != "" {
 		originalPostIdToSave.String = requestBody.OriginalPostID
@@ -795,8 +810,8 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	postID := ulid.Make().String()
 
 	_, err = db.Exec(
-		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, original_post_id) VALUES (?, ?, ?, ?, ?, ?)",
-		postID, userID, userName, requestBody.Content, imageUrlToSave, originalPostIdToSave,
+		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, video_url, media_type, original_post_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		postID, userID, userName, requestBody.Content, imageUrlToSave, videoUrlToSave, mediaTypeToSave, originalPostIdToSave,
 	)
 	if err != nil {
 		log.Printf("エラー: postsテーブルへのINSERTに失敗: %v", err)
@@ -804,11 +819,12 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ▼▼▼ 作成した投稿の完全なデータを取得して返すロジック ▼▼▼
+	// ▼▼▼ 作成した投稿の完全なデータを取得して返すロジック（ここを修正）▼▼▼
 	var createdPost Post
+	// ★ 修正: video_url, media_type をSELECT句に追加
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
@@ -817,7 +833,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
 			(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
 			EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+            EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
@@ -826,12 +842,13 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
     `
 	row := db.QueryRow(query, userID, userID, userID, postID)
 
-	var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
+	var content, imageURL, videoURL, mediaType, resOriginalPostID, userProfileImageURL sql.NullString
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 	var origCreatedAt sql.NullTime
 
+	// ★ 修正: Scanの引数に videoURL, mediaType を追加
 	err = row.Scan(
-		&createdPost.PostID, &createdPost.UserID, &content, &imageURL, &createdPost.CreatedAt, &resOriginalPostID,
+		&createdPost.PostID, &createdPost.UserID, &content, &imageURL, &videoURL, &mediaType, &createdPost.CreatedAt, &resOriginalPostID,
 		&createdPost.UserName, &userProfileImageURL,
 		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 		&origUserName, &origUserProfileImageURL,
@@ -848,18 +865,20 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 
 	if content.Valid { createdPost.Content = &content.String }
 	if imageURL.Valid { createdPost.ImageURL = &imageURL.String }
+	if videoURL.Valid { createdPost.VideoURL = &videoURL.String } // ★ 追加
+	if mediaType.Valid { createdPost.MediaType = &mediaType.String } // ★ 追加
 	if userProfileImageURL.Valid { createdPost.UserProfileImageURL = &userProfileImageURL.String }
 	if resOriginalPostID.Valid {
-		var originalPostData Post
-		originalPostData.PostID = origPostID.String
-		originalPostData.UserID = origUserID.String
-		if origContent.Valid { originalPostData.Content = &origContent.String }
-		if origImageURL.Valid { originalPostData.ImageURL = &origImageURL.String }
-		if origCreatedAt.Valid { originalPostData.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
-		if origUserName.Valid { originalPostData.UserName = origUserName.String }
-		if origUserProfileImageURL.Valid { originalPostData.UserProfileImageURL = &origUserProfileImageURL.String }
-		createdPost.OriginalPost = &originalPostData
-	}
+        var originalPostData Post
+        originalPostData.PostID = origPostID.String
+        originalPostData.UserID = origUserID.String
+        if origContent.Valid { originalPostData.Content = &origContent.String }
+        if origImageURL.Valid { originalPostData.ImageURL = &origImageURL.String }
+        if origCreatedAt.Valid { originalPostData.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+        if origUserName.Valid { originalPostData.UserName = origUserName.String }
+        if origUserProfileImageURL.Valid { originalPostData.UserProfileImageURL = &origUserProfileImageURL.String }
+        createdPost.OriginalPost = &originalPostData
+    }
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -1085,28 +1104,21 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // main.go
-
 func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodGet {
-        http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
-        return
-    }
-
-    pathSegments := strings.Split(r.URL.Path, "/")
-    if len(pathSegments) < 5 {
-        http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
-        return
-    }
-    parentPostID := pathSegments[4]
-    currentUserID := ""
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 {
+		http.Error(w, "親となる投稿IDがパスに含まれていません", http.StatusBadRequest)
+		return
+	}
+	parentPostID := pathSegments[4]
+	currentUserID := ""
 	if userID, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = userID
 	}
 
-	// ★ 修正点: SQLクエリをLEFT JOINを使ったものに変更
-    query := `
+	query := `
         SELECT
-            p.post_id, p.user_id, COALESCE(u.name, p.user_name), u.profile_image_url, p.content, p.image_url, p.created_at,
+            p.post_id, p.user_id, COALESCE(u.name, p.user_name), u.profile_image_url, p.content, p.image_url, p.video_url, p.media_type, p.created_at,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
@@ -1117,36 +1129,47 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY p.created_at ASC
     `
 
-    rows, err := db.Query(query, currentUserID, currentUserID, parentPostID)
-    if err != nil {
-        log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        return
-    }
-    defer rows.Close()
+	rows, err := db.Query(query, currentUserID, currentUserID, parentPostID)
+	if err != nil {
+		log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
 
-    replies := make([]Post, 0)
-    for rows.Next() {
-        var p Post
-		// ★ 修正点: Scanの対象に &p.UserProfileImageURL を追加
-        if err := rows.Scan(&p.PostID, &p.UserID, &p.UserName, &p.UserProfileImageURL, &p.Content, &p.ImageURL, &p.CreatedAt, &p.LikeCount, &p.IsLikedByMe, &p.ReplyCount, &p.IsBookmarkedByMe); err != nil {
-            log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
-            http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-            return
-        }
-        replies = append(replies, p)
-    }
+	replies := make([]Post, 0)
+	for rows.Next() {
+		var p Post
+		var userName, profileImageURL, content, imageURL, videoURL, mediaType sql.NullString
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &userName, &profileImageURL, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount, &p.IsBookmarkedByMe,
+		)
+		if err != nil {
+			log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
 
-    bytes, err := json.Marshal(replies)
-    if err != nil {
-        log.Printf("エラー: json.Marshal (replies) に失敗しました: %v", err)
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        return
-    }
+		if userName.Valid { p.UserName = userName.String }
+		if profileImageURL.Valid { p.UserProfileImageURL = &profileImageURL.String }
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+		if mediaType.Valid { p.MediaType = &mediaType.String }
 
-    w.Header().Set("Content-Type", "application/json")
-    w.Write(bytes)
-    log.Printf("リプライ一覧の取得リクエスト成功: parent_id=%s", parentPostID)
+		replies = append(replies, p)
+	}
+
+	bytes, err := json.Marshal(replies)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (replies) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
 }
 
 func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
@@ -1232,7 +1255,7 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
@@ -1260,12 +1283,12 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
@@ -1281,6 +1304,8 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 
 		if content.Valid { p.Content = &content.String }
 		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+        if mediaType.Valid { p.MediaType = &mediaType.String }
 		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
 
 		if originalPostID.Valid {
@@ -1361,6 +1386,62 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"imageUrl": publicURL})
 	log.Printf("画像アップロード成功: %s", publicURL)
+}
+
+// main.go にこのハンドラを新規追加してください
+// (imageUploadHandlerの近くに置くと分かりやすいです)
+
+func videoUploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 'video'というキーでフォームデータからファイルを取得
+	file, _, err := r.FormFile("video")
+	if err != nil {
+		log.Printf("動画の取得に失敗: %v", err)
+		http.Error(w, "動画の取得に失敗しました", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ctx := context.Background()
+	bucketName := os.Getenv("GCS_BUCKET_NAME")
+	if bucketName == "" {
+		log.Println("環境変数 GCS_BUCKET_NAME が設定されていません")
+		http.Error(w, "サーバー設定エラー", http.StatusInternalServerError)
+		return
+	}
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		log.Printf("GCSクライアントの作成に失敗: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer client.Close()
+
+	// ULIDでユニークなファイル名を生成（拡張子は.mp4と仮定）
+	objectName := ulid.Make().String() + ".mp4"
+	
+	writer := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
+
+	if _, err := io.Copy(writer, file); err != nil {
+		log.Printf("GCSへのファイルコピーに失敗: %v", err)
+		http.Error(w, "アップロードに失敗しました", http.StatusInternalServerError)
+		return
+	}
+	if err := writer.Close(); err != nil {
+		log.Printf("GCS writerのクローズに失敗: %v", err)
+		http.Error(w, "アップロード後の処理に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"videoUrl": publicURL}) // videoUrlとして返す
+	log.Printf("動画アップロード成功: %s", publicURL)
 }
 
 func authMiddleware(next http.Handler) http.Handler {
@@ -1551,7 +1632,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	// ★ 修正: リツイート情報、お気に入り情報などを全て取得するクエリに修正
 	sqlQuery := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
@@ -1585,13 +1666,13 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
 		// ★ 修正: クエリで取得する全ての列を受け取るようにScanの引数を修正
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
@@ -1607,6 +1688,8 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 
 		if content.Valid { p.Content = &content.String }
 		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+		if mediaType.Valid { p.MediaType = &mediaType.String }
 		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
 
 		if originalPostID.Valid {
@@ -1763,24 +1846,20 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
 		return
 	}
-
 	pathSegments := strings.Split(r.URL.Path, "/")
-	// /api/posts/{id}/quote_retweets のようなパスを想定
 	if len(pathSegments) < 5 {
 		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
 		return
 	}
 	originalPostID := pathSegments[4]
-
 	currentUserID := ""
 	if userID, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = userID
 	}
 
-	// original_post_id を持ち、かつ content が空でない投稿を取得するクエリ
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
@@ -1809,12 +1888,12 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, resOriginalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &resOriginalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &resOriginalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
@@ -1830,6 +1909,8 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 
 		if content.Valid { p.Content = &content.String }
 		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+		if mediaType.Valid { p.MediaType = &mediaType.String }
 		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
 
 		if resOriginalPostID.Valid {
@@ -2525,7 +2606,7 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
@@ -2557,12 +2638,12 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
@@ -2578,10 +2659,22 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 
 		if content.Valid { p.Content = &content.String }
 		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+		if mediaType.Valid { p.MediaType = &mediaType.String }
 		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
 		if originalPostID.Valid {
 			var originalPost Post
-			// ... (original postの詰め替え処理) ...
+			originalPost.PostID = origPostID.String
+			originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }
+			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { 
+				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
+				// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
+				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
+			}
+			if origUserName.Valid { originalPost.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
 		}
 
@@ -2660,6 +2753,7 @@ func main() {
 	// --- 認証が必須なエンドポイント ---
 	mux.Handle("/post", authMiddleware(http.HandlerFunc(postCreateHandler)))
 	mux.Handle("/api/post/image", authMiddleware(http.HandlerFunc(imageUploadHandler)))
+	mux.Handle("/api/post/video", authMiddleware(http.HandlerFunc(videoUploadHandler))) // ★ この行を追加
 	mux.Handle("/api/posts/like/", authMiddleware(http.HandlerFunc(likeHandler)))
 	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler)))
 	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
