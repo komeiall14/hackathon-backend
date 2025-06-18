@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"regexp"
     "sort"
+	"math/rand"
+    "time"
 	"cloud.google.com/go/storage"
 	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
@@ -2735,6 +2737,126 @@ func bookmarkHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// generateGeminiContent は、Geminiにリクエストを送り、投稿文を生成する補助関数です
+func generateGeminiContent(prompt string) (string, error) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("GEMINI_API_KEY が設定されていません")
+	}
+
+	ctx := context.Background()
+	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	if err != nil {
+		return "", fmt.Errorf("Geminiクライアントの作成に失敗: %w", err)
+	}
+	defer client.Close()
+
+	model := client.GenerativeModel("gemini-1.5-flash")
+	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	if err != nil {
+		return "", fmt.Errorf("Geminiからのコンテンツ生成に失敗: %w", err)
+	}
+
+	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+		if text, ok := resp.Candidates[0].Content.Parts[0].(genai.Text); ok {
+			return string(text), nil
+		}
+	}
+	return "", fmt.Errorf("Geminiから有効なコンテンツが生成されませんでした")
+}
+
+
+// createNewBotAndPostHandler は、新しいボットユーザーを生成し、そのユーザーとして投稿します
+// createNewBotAndPostHandler は、新しいボットユーザーを生成し、そのユーザーとして投稿します
+func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+	log.Println("新規ボット生成＆投稿リクエストを受信...")
+
+	// --- 1. 新しいボットユーザーのランダムな情報を生成 ---
+	rand.Seed(time.Now().UnixNano())
+	
+	firstNames := []string{"蒼", "凛", "陽葵", "湊", "結菜", "蓮", "芽依"}
+	lastNames := []string{"佐藤", "鈴木", "高橋", "田中", "渡辺", "伊藤", "山本"}
+	botName := lastNames[rand.Intn(len(lastNames))] + " " + firstNames[rand.Intn(len(firstNames))] + " (Bot)"
+
+	// picsum.photos を使ってランダムな画像URLを生成
+	profileImageURL := fmt.Sprintf("https://picsum.photos/seed/%s/400/400", ulid.Make().String())
+	headerImageURL := fmt.Sprintf("https://picsum.photos/seed/%s/1500/500", ulid.Make().String())
+	
+	botULID := ulid.Make().String()
+	botFirebaseUID := "bot_" + botULID // ボット用のユニークなID
+
+	// --- 2. Geminiで投稿内容と自己紹介文を生成 ---
+	topics := []string{"宇宙の謎", "深海魚", "古代文明", "未来の食事", "週末に行きたい場所", "AIと社会について思うこと"}
+	randomTopic := topics[rand.Intn(len(topics))]
+	
+	// ▼▼▼ 変更点1: 自己紹介文を生成するためのプロンプトとAPI呼び出しを追加 ▼▼▼
+	bioPrompt := fmt.Sprintf("あなたはSNSユーザーです。'%s'というトピックに詳しい専門家として、100文字程度の自己紹介文を日本語で生成してください。少し個性的で面白い感じの文章でお願いします。", randomTopic)
+	botBio, err := generateGeminiContent(bioPrompt)
+	if err != nil {
+		log.Printf("Gemini自己紹介文生成エラー: %v", err)
+		http.Error(w, "AIによる自己紹介文の生成に失敗しました", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Geminiが生成した自己紹介文: %s", botBio)
+	// ▲▲▲ 変更点1ここまで ▲▲▲
+
+    postPrompt := fmt.Sprintf("あなたはSNSユーザーです。'%s'というトピックについて、面白くて少し考えさせられるような、140文字程度の短い投稿を日本語で生成してください。必ず関連するハッシュタグを1つだけ付けてください。", randomTopic)
+	postContent, err := generateGeminiContent(postPrompt)
+	if err != nil {
+		log.Printf("Gemini投稿生成エラー: %v", err)
+		http.Error(w, "AIによる投稿生成に失敗しました", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Geminiが生成した投稿内容: %s", postContent)
+
+	// --- 3. データベース処理（トランザクション内で実行）---
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("トランザクション開始エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	// ▼▼▼ 変更点2: ハードコードされた自己紹介文を、生成した`botBio`変数に置き換える ▼▼▼
+	// 3-1. 新しいボットユーザーを `user` テーブルにINSERT
+	_, err = tx.Exec(
+		"INSERT INTO user (id, firebase_uid, name, profile_image_url, header_image_url, bio) VALUES (?, ?, ?, ?, ?, ?)",
+		botULID, botFirebaseUID, botName, profileImageURL, headerImageURL, botBio, // "私は..."の文字列を置き換え
+	)
+	// ▲▲▲ 変更点2ここまで ▲▲▲
+	if err != nil {
+		log.Printf("新規ボットユーザーのDB保存に失敗: %v", err)
+		http.Error(w, "ボットユーザーの作成に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	// 3-2. 新しい投稿を `posts` テーブルにINSERT
+	postID := ulid.Make().String()
+	_, err = tx.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, content) VALUES (?, ?, ?, ?)",
+		postID, botFirebaseUID, botName, postContent,
+	)
+	if err != nil {
+		log.Printf("ボット投稿のDB保存に失敗: %v", err)
+		http.Error(w, "投稿の保存に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("ボット作成トランザクションのコミットエラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("新規ボットユーザー '%s' による投稿成功！", botName)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "新規ボットによる投稿が作成されました。"})
+}
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
     log.Println("main 関数を開始します...")
@@ -2774,6 +2896,8 @@ func main() {
 	mux.Handle("/api/login", http.HandlerFunc(loginHandler))
 
 	mux.Handle("/api/retweet/", authMiddleware(http.HandlerFunc(retweetHandler)))
+
+	mux.HandleFunc("/api/bot/create-and-post", createNewBotAndPostHandler)
 
 	mux.HandleFunc("/api/trends", trendsHandler)
 	
