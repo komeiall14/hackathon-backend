@@ -2144,7 +2144,7 @@ func trendsHandler(w http.ResponseWriter, r *http.Request) {
     defer rows.Close()
 
     // ハッシュタグを抽出するための正規表現
-    re := regexp.MustCompile(`#(\w+)`)
+	re := regexp.MustCompile(`#([\p{L}\p{N}_]+)`)
     hashtagCounts := make(map[string]int)
 
     for rows.Next() {
