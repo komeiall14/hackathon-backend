@@ -63,6 +63,8 @@ type Post struct {
 	IsRetweetedByMe     bool    `json:"is_retweeted_by_me"`
 	IsBookmarkedByMe    bool    `json:"is_bookmarked_by_me"`
 	OriginalPost        *Post   `json:"original_post,omitempty"`
+	BadCount            int     `json:"bad_count"`          // ★ 追加
+    IsBaddedByMe        bool    `json:"is_badded_by_me"`  
 }
 
 // main.go
@@ -540,7 +542,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 }
 // main.go
 // postGetHandlerは特定の1件の投稿を取得します。
-// main.go の postGetHandler 関数をこれで置き換えてください
+// main.go の postGetHandler 関数を、この内容に丸ごと置き換えてください
 
 func postGetHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
@@ -555,7 +557,6 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 		currentUserID = userID
 	}
 
-	// ★ 修正: SELECT句に p.video_url, p.media_type を追加
 	query := `
         SELECT
             p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
@@ -565,6 +566,8 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -576,27 +579,24 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
         WHERE p.post_id = ?
     `
-
-	row := db.QueryRow(query, currentUserID, currentUserID, currentUserID, postID)
-
-	if row.Err() != nil {
-        log.Printf("エラー: db.QueryRow (single post) に失敗: %v", row.Err())
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-    }
+	
+	// ★★★ 修正点1: 引数に currentUserID を1つ追加 ★★★
+	row := db.QueryRow(query, currentUserID, currentUserID, currentUserID, currentUserID, postID)
 
 	var p Post
 	var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 	var origCreatedAt sql.NullTime
 
-	// ★ 修正: Scanの引数に &videoURL, &mediaType を追加
+	// ★★★ 修正点2: Scanの引数に &p.BadCount, &p.IsBaddedByMe を追加 ★★★
 	err := row.Scan(
 		&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 		&p.UserName, &userProfileImageURL,
 		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 		&origUserName, &origUserProfileImageURL,
-		&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+		&p.LikeCount, &p.IsLikedByMe,
+		&p.BadCount, &p.IsBaddedByMe,
+		&p.ReplyCount,
 		&p.RetweetCount, &p.IsRetweetedByMe,
 		&p.IsBookmarkedByMe,
 	)
@@ -625,7 +625,6 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 		if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
 		if origCreatedAt.Valid { 
 			originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
-			// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
 			log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
 		}
 		if origUserName.Valid { originalPost.UserName = origUserName.String }
@@ -682,6 +681,8 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -699,7 +700,7 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
     `
 
 	// db.Queryにlimitとoffsetを渡す
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, limit, offset)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, limit, offset)
 
 	if err != nil {
 		log.Printf("エラー: db.Query (all posts) に失敗しました: %v", err)
@@ -724,6 +725,8 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.BadCount,        // ★ 追加
+    		&p.IsBaddedByMe,  
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -802,6 +805,8 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -821,7 +826,7 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
     `
 
 	// db.Queryに渡す引数を修正
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, currentUserID, limit, offset)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, currentUserID, currentUserID, limit, offset)
 	if err != nil {
 		log.Printf("エラー: db.Query (following posts) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -844,6 +849,8 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.BadCount,        // ★ 追加
+    		&p.IsBaddedByMe,  
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -960,6 +967,8 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
 			(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
 			EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -1162,6 +1171,61 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
 	}
 }
+
+// main.go の likeHandler の近くにこの関数を追加
+
+func badHandler(w http.ResponseWriter, r *http.Request) {
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 {
+		http.Error(w, "投稿IDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	postID := pathSegments[4]
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		badID := ulid.Make().String()
+		// ★ "likes" テーブルを "bads" テーブルに、"like_id" を "bad_id" に変更
+		_, err := db.Exec("INSERT INTO bads (bad_id, user_id, post_id) VALUES (?, ?, ?)", badID, userID, postID)
+		
+		if err != nil {
+			if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1062 {
+				log.Printf("よくないね済みのためスキップ: user_id=%s, post_id=%s", userID, postID)
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			log.Printf("エラー: db.Exec (insert bad) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+
+		// ※UXを考慮し、「よくないね」の場合は相手に通知を送りません。
+
+		w.WriteHeader(http.StatusCreated)
+		log.Printf("よくないね成功: user_id=%s, post_id=%s", userID, postID)
+
+	case http.MethodDelete:
+		// ★ "likes" テーブルを "bads" テーブルに変更
+		_, err := db.Exec("DELETE FROM bads WHERE user_id = ? AND post_id = ?", userID, postID)
+		if err != nil {
+			log.Printf("エラー: db.Exec (delete bad) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		log.Printf("よくないね取り消し成功: user_id=%s, post_id=%s", userID, postID)
+
+	default:
+		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
+	}
+}
+
 func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		log.Printf("メソッド不允许: /api/posts/reply/ に %s メソッドでアクセスがありました\n", r.Method)
@@ -1247,7 +1311,8 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s\n", replyID, parentPostID)
 }
 
-// main.go
+// main.go の repliesGetHandler 関数を、この内容に丸ごと置き換えてください
+
 func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
 	if len(pathSegments) < 5 {
@@ -1265,6 +1330,8 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
             p.post_id, p.user_id, COALESCE(u.name, p.user_name), u.profile_image_url, p.content, p.image_url, p.video_url, p.media_type, p.created_at,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
 			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
@@ -1273,7 +1340,7 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY p.created_at ASC
     `
 
-	rows, err := db.Query(query, currentUserID, currentUserID, parentPostID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, parentPostID)
 	if err != nil {
 		log.Printf("エラー: db.Query (replies) に失敗しました: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1285,10 +1352,17 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p Post
 		var userName, profileImageURL, content, imageURL, videoURL, mediaType sql.NullString
+		
+		// ▼▼▼ この rows.Scan の行を修正しました ▼▼▼
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &userName, &profileImageURL, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount, &p.IsBookmarkedByMe,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe, // ★ bad_count, is_badded_by_me を追加
+			&p.ReplyCount, 
+			&p.IsBookmarkedByMe,
 		)
+		// ▲▲▲ 修正ここまで ▲▲▲
+
 		if err != nil {
 			log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1405,6 +1479,8 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -1416,7 +1492,7 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
         WHERE p.user_id = ? -- ★★★ ここの条件を変更し、リツイートも取得対象に含めます ★★★
         ORDER BY p.created_at DESC
     `
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, userID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, userID)
 	if err != nil {
 		log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1438,6 +1514,8 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.BadCount,        // ★ 追加
+    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -1782,6 +1860,8 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -1822,6 +1902,8 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.BadCount,        // ★ 追加
+    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -1909,6 +1991,8 @@ func retweetHandler(w http.ResponseWriter, r *http.Request) {
 				orig_u.name, orig_u.profile_image_url,
 				(SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
 				EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+				(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            	EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
 				(SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
 				(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
 				EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -2009,6 +2093,8 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -2021,7 +2107,7 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY p.created_at DESC
     `
 
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, originalPostID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, originalPostID)
 	if err != nil {
 		log.Printf("エラー: db.Query (quote retweets) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -2043,6 +2129,8 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.BadCount,        // ★ 追加
+    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -2165,7 +2253,7 @@ func followingListHandler(w http.ResponseWriter, r *http.Request) {
 		INNER JOIN follows f ON u.firebase_uid = f.following_id
 		WHERE f.follower_id = ?
 	`
-	rows, err := db.Query(query, currentUserID, profileUserID)
+	rows, err := db.Query(query, currentUserID, currentUserID, profileUserID)
 	if err != nil {
 		log.Printf("フォロー中のユーザー一覧取得エラー: %v", err)
 		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
@@ -2202,7 +2290,7 @@ func followerListHandler(w http.ResponseWriter, r *http.Request) {
 		INNER JOIN follows f ON u.firebase_uid = f.follower_id
 		WHERE f.following_id = ?
 	`
-	rows, err := db.Query(query, currentUserID, profileUserID)
+	rows, err := db.Query(query, currentUserID, currentUserID, profileUserID)
 	if err != nil {
 		log.Printf("フォロワー一覧取得エラー: %v", err)
 		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
@@ -2370,7 +2458,7 @@ func getConversationsHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY c.updated_at DESC;
     `
 
-    rows, err := db.Query(query, currentUserID)
+    rows, err := db.Query(query, currentUserID, currentUserID)
     if err != nil {
         log.Printf("会話一覧の取得エラー: %v", err)
         http.Error(w, "サーバーエラー", http.StatusInternalServerError)
@@ -2756,6 +2844,8 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
@@ -2769,7 +2859,7 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY b.created_at DESC
     `
 
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID)
 	if err != nil {
 		log.Printf("ブックマーク投稿の取得エラー: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -2793,6 +2883,8 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.BadCount,        // ★ 追加
+    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -2909,7 +3001,23 @@ func generateGeminiContent(prompt string) (string, error) {
 
 
 // createNewBotAndPostHandler は、新しいボットユーザーを生成し、そのユーザーとして投稿します
-// createNewBotAndPostHandler は、新しいボットユーザーを生成し、そのユーザーとして投稿します
+// main.go の createNewBotAndPostHandler をこの内容に置き換えてください
+
+// GeminiからのJSONレスポンスを格納するための構造体
+// main.go
+
+// ★ フロントエンドからのリクエストボディをマッピングするための構造体
+type BotRequest struct {
+	Topic string `json:"topic,omitempty"`
+}
+
+// GeminiからのJSONレスポンスを格納するための構造体
+type BotPersona struct {
+	Name string `json:"name"`
+	Bio  string `json:"bio"`
+	Post string `json:"post"`
+}
+
 func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POSTメソッドのみが許可されています", http.StatusMethodNotAllowed)
@@ -2917,45 +3025,81 @@ func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Println("新規ボット生成＆投稿リクエストを受信...")
 
-	// --- 1. 新しいボットユーザーのランダムな情報を生成 ---
+	// ★ リクエストボディからユーザー指定のトピックを読み取る
+	var req BotRequest
+	// ボディが空の場合でもエラーとしないように、エラーは無視する
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	// --- 1. ボットの基本情報を準備 ---
 	rand.Seed(time.Now().UnixNano())
 	
-	firstNames := []string{"蒼", "凛", "陽葵", "湊", "結菜", "蓮", "芽依"}
-	lastNames := []string{"佐藤", "鈴木", "高橋", "田中", "渡辺", "伊藤", "山本"}
-	botName := lastNames[rand.Intn(len(lastNames))] + " " + firstNames[rand.Intn(len(firstNames))] + " (Bot)"
-
-	// picsum.photos を使ってランダムな画像URLを生成
 	profileImageURL := fmt.Sprintf("https://picsum.photos/seed/%s/400/400", ulid.Make().String())
 	headerImageURL := fmt.Sprintf("https://picsum.photos/seed/%s/1500/500", ulid.Make().String())
 	
 	botULID := ulid.Make().String()
-	botFirebaseUID := "bot_" + botULID // ボット用のユニークなID
+	botFirebaseUID := "bot_" + botULID
 
-	// --- 2. Geminiで投稿内容と自己紹介文を生成 ---
-	topics := []string{"宇宙の謎", "深海魚", "古代文明", "未来の食事", "週末に行きたい場所", "AIと社会について思うこと"}
-	randomTopic := topics[rand.Intn(len(topics))]
-	
-	// ▼▼▼ 変更点1: 自己紹介文を生成するためのプロンプトとAPI呼び出しを追加 ▼▼▼
-	bioPrompt := fmt.Sprintf("あなたはSNSユーザーです。'%s'というトピックに詳しい専門家として、100文字程度の自己紹介文を日本語で生成してください。少し個性的で面白い感じの文章でお願いします。", randomTopic)
-	botBio, err := generateGeminiContent(bioPrompt)
-	if err != nil {
-		log.Printf("Gemini自己紹介文生成エラー: %v", err)
-		http.Error(w, "AIによる自己紹介文の生成に失敗しました", http.StatusInternalServerError)
-		return
+	// --- 2. Geminiでペルソナ（名前、自己紹介、投稿）を一括生成 ---
+	creativeAdjectives := []string{"風変わりな", "個性的な", "意外な一面を持つ", "思慮深い", "陽気な", "少し内気な", "夢見がちな", "現実的な", "インドア派の"}
+	randomAdjective := creativeAdjectives[rand.Intn(len(creativeAdjectives))]
+
+	// ★★★ ここからテーマ決定ロジック ★★★
+	var finalTheme string
+	if req.Topic != "" {
+		// リクエストでトピックが指定されていれば、それを使用
+		finalTheme = req.Topic
+		log.Printf("ユーザー指定トピックを使用: %s", finalTheme)
+	} else {
+		// 指定がなければ、従来通りランダムなテーマを使用
+		tweetThemes := []string{
+			"仕事や勉強のちょっとした気づき", "最近見た映画やアニメ、読んだ本についての感想", "週末の予定や、次の休みにやりたいこと",
+			"個人的な小さな目標や挑戦について", "ふと目にした面白いニュースや雑学", "人間関係でふと感じたこと",
+			"最近買ってよかったものや、欲しいもの", "ふと昔を思い出して懐かしくなったこと", "今日の天気や季節の変わり目について感じること", "最近聴いている音楽について",
+		}
+		finalTheme = tweetThemes[rand.Intn(len(tweetThemes))]
+		log.Printf("ランダムトピックを使用: %s", finalTheme)
 	}
-	log.Printf("Geminiが生成した自己紹介文: %s", botBio)
-	// ▲▲▲ 変更点1ここまで ▲▲▲
+	// ★★★ ここまでテーマ決定ロジック ★★★
 
-    postPrompt := fmt.Sprintf("あなたはSNSユーザーです。'%s'というトピックについて、面白くて少し考えさせられるような、140文字程度の短い投稿を日本語で生成してください。必ず関連するハッシュタグを1つだけ付けてください。", randomTopic)
-	postContent, err := generateGeminiContent(postPrompt)
+	personaPrompt := fmt.Sprintf(`
+		日本のSNSにいる、ごく一般的な「%s」架空の人物を1人、ランダムに創造してください。
+		その人物について、以下の情報をJSON形式で出力してください。
+
+		- "name": 架空のSNSアカウント名。本名ではなく、ひらがな、カタカナ、ローマ字、またはそれらの組み合わせで作られた、個性的で覚えやすいニックネームやハンドル名です。(例: もちまる, ねこ吸い, Kaito_std, くりーむ)
+		- "bio": そのアカウントの自己紹介文(80文字程度)。趣味、好きなこと、最近ハマっていること、座右の銘などを簡潔に書いた、専門性のないごく一般的な自己紹介です。
+		- "post": そのアカウントが「%s」というテーマで「いま、ふと思ったこと」を投稿する、140文字程度の自然なツイート。内容は、日常の出来事、個人的な意見、ちょっとした発見、面白いと感じたことなど、多岐にわたるようにしてください。ハッシュタグは、付けても付けなくても構いません。もし付ける場合は、文脈に合ったものを1つか2つ、自然な形で付けてください。
+
+		毎回、全く異なる個性と内容の人物を生成してください。
+		出力はJSONオブジェクトだけにしてください。
+	`, randomAdjective, finalTheme) // ★ 最終決定したテーマをプロンプトに埋め込む
+
+	// ...（これ以降の Gemini呼び出し、DB保存処理は変更なし）...
+	personaJson, err := generateGeminiContent(personaPrompt)
 	if err != nil {
-		log.Printf("Gemini投稿生成エラー: %v", err)
+		log.Printf("Geminiペルソナ生成エラー: %v", err)
 		http.Error(w, "AIによる投稿生成に失敗しました", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("Geminiが生成した投稿内容: %s", postContent)
+	log.Printf("Geminiが生成したJSON: %s", personaJson)
 
-	// --- 3. データベース処理（トランザクション内で実行）---
+	var persona BotPersona
+	re := regexp.MustCompile("(?s)```json\n(.*?)\n```")
+    matches := re.FindStringSubmatch(personaJson)
+    jsonToParse := personaJson
+    if len(matches) > 1 {
+        jsonToParse = matches[1]
+    }
+
+	if err := json.Unmarshal([]byte(jsonToParse), &persona); err != nil {
+		log.Printf("GeminiのJSONパースエラー: %v", err)
+		http.Error(w, "AIからの応答解析に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	botName := persona.Name + " (Bot)"
+	botBio := persona.Bio
+	postContent := persona.Post
+
 	tx, err := db.Begin()
 	if err != nil {
 		log.Printf("トランザクション開始エラー: %v", err)
@@ -2964,20 +3108,16 @@ func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// ▼▼▼ 変更点2: ハードコードされた自己紹介文を、生成した`botBio`変数に置き換える ▼▼▼
-	// 3-1. 新しいボットユーザーを `user` テーブルにINSERT
 	_, err = tx.Exec(
 		"INSERT INTO user (id, firebase_uid, name, profile_image_url, header_image_url, bio) VALUES (?, ?, ?, ?, ?, ?)",
-		botULID, botFirebaseUID, botName, profileImageURL, headerImageURL, botBio, // "私は..."の文字列を置き換え
+		botULID, botFirebaseUID, botName, profileImageURL, headerImageURL, botBio,
 	)
-	// ▲▲▲ 変更点2ここまで ▲▲▲
 	if err != nil {
 		log.Printf("新規ボットユーザーのDB保存に失敗: %v", err)
 		http.Error(w, "ボットユーザーの作成に失敗しました", http.StatusInternalServerError)
 		return
 	}
 
-	// 3-2. 新しい投稿を `posts` テーブルにINSERT
 	postID := ulid.Make().String()
 	_, err = tx.Exec(
 		"INSERT INTO posts (post_id, user_id, user_name, content) VALUES (?, ?, ?, ?)",
@@ -2999,7 +3139,6 @@ func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "新規ボットによる投稿が作成されました。"})
 }
-
 
 // main.go にこの関数を丸ごと追加
 
@@ -3289,6 +3428,7 @@ func main() {
 	mux.Handle("/api/post/image", authMiddleware(http.HandlerFunc(imageUploadHandler)))
 	mux.Handle("/api/post/video", authMiddleware(http.HandlerFunc(videoUploadHandler))) // ★ この行を追加
 	mux.Handle("/api/posts/like/", authMiddleware(http.HandlerFunc(likeHandler)))
+	mux.Handle("/api/posts/bad/", authMiddleware(http.HandlerFunc(badHandler)))
 	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler)))
 	mux.Handle("/api/posts/delete/", authMiddleware(http.HandlerFunc(postDeleteHandler)))
 	mux.Handle("/api/posts/bookmark/", authMiddleware(http.HandlerFunc(bookmarkHandler)))
