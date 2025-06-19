@@ -27,6 +27,8 @@ import (
 	"google.golang.org/api/option"
 	"firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/auth"
+	"golang.org/x/net/html"
+	
 )
 type UserResForHTTPGet struct {
     Id               string  `json:"id"`
@@ -97,6 +99,16 @@ type NotificationResponse struct {
 	EntityID  *string   `json:"entity_id"`
 	IsRead    bool      `json:"is_read"`
 	CreatedAt string `json:"created_at"`
+}
+
+// main.go
+
+// OGP情報を格納する構造体
+type OGPResponse struct {
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	ImageURL    string `json:"image_url,omitempty"`
+	SiteURL     string `json:"site_url,omitempty"`
 }
 
 // main.go に以下の2つのハンドラを新規追加
@@ -2857,6 +2869,87 @@ func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "新規ボットによる投稿が作成されました。"})
 }
+
+
+// main.go にこの関数を丸ごと追加
+
+func ogpHandler(w http.ResponseWriter, r *http.Request) {
+	targetURL := r.URL.Query().Get("url")
+	if targetURL == "" {
+		http.Error(w, "url query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// タイムアウト付きのクライアントを作成
+	client := http.Client{
+		Timeout: 5 * time.Second,
+	}
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		log.Printf("Failed to fetch OGP data for url %s: %v", targetURL, err)
+		http.Error(w, "Failed to fetch URL", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	doc, err := html.Parse(resp.Body)
+	if err != nil {
+		log.Printf("Failed to parse HTML for url %s: %v", targetURL, err)
+		http.Error(w, "Failed to parse HTML", http.StatusInternalServerError)
+		return
+	}
+
+	ogp := OGPResponse{
+		SiteURL: targetURL,
+	}
+	
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "meta" {
+			var property, content string
+			for _, a := range n.Attr {
+				if a.Key == "property" || a.Key == "name" {
+					property = a.Val
+				}
+				if a.Key == "content" {
+					content = a.Val
+				}
+			}
+			switch property {
+			case "og:title":
+				if ogp.Title == "" { ogp.Title = content }
+			case "og:description":
+				if ogp.Description == "" { ogp.Description = content }
+			case "og:image":
+				if ogp.ImageURL == "" { ogp.ImageURL = content }
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(doc)
+
+	if ogp.Title == "" {
+		// OGPが見つからなかった場合、titleタグを探す
+		var fTitle func(*html.Node)
+		fTitle = func(n *html.Node) {
+			if n.Type == html.ElementNode && n.Data == "title" && n.FirstChild != nil {
+				ogp.Title = n.FirstChild.Data
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if ogp.Title == "" { // titleが見つかったら探索を終了
+					fTitle(c)
+				}
+			}
+		}
+		fTitle(doc)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ogp)
+}
+
 // main関数のmux設定部分をこの内容に置き換えてください
 func main() {
     log.Println("main 関数を開始します...")
@@ -2910,6 +3003,8 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Backend is running."))
 	})
+
+	mux.HandleFunc("/api/ogp", ogpHandler)
 
 
     c := cors.New(cors.Options{
