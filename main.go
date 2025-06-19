@@ -28,7 +28,7 @@ import (
 	"firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/auth"
 	"golang.org/x/net/html"
-	
+	"github.com/gorilla/websocket"
 )
 type UserResForHTTPGet struct {
     Id               string  `json:"id"`
@@ -766,8 +766,124 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
+// main.go の postsGetHandler の近くにこの関数を追加してください
+
+func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 認証ミドルウェアでセットされたユーザーIDを取得
+	currentUserID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	// ページネーションのためのlimitとoffsetを取得
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = 20
+	}
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	// SQLクエリを修正して、フォロー中のユーザー(f.follower_id = ?)と自分自身(p.user_id = ?)の投稿を取得
+	query := `
+        SELECT
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+        FROM
+            posts p
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
+        LEFT JOIN follows f ON p.user_id = f.following_id -- followsテーブルをJOIN
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        WHERE
+            p.parent_post_id IS NULL AND (f.follower_id = ? OR p.user_id = ?) -- フォローしている人と自分の投稿に絞り込み
+        GROUP BY p.post_id -- 重複を除外
+        ORDER BY
+            p.created_at DESC
+        LIMIT ? OFFSET ?
+    `
+
+	// db.Queryに渡す引数を修正
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, currentUserID, limit, offset)
+	if err != nil {
+		log.Printf("エラー: db.Query (following posts) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// postsGetHandlerからスキャンとJSONエンコードのロジックをコピー
+	posts := make([]Post, 0)
+	for rows.Next() {
+		var p Post
+		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+			&p.UserName, &userProfileImageURL,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.IsBookmarkedByMe,
+		)
+		if err != nil {
+			log.Printf("エラー: rows.Scan (following posts) に失敗しました: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		
+		if content.Valid { p.Content = &content.String }
+		if imageURL.Valid { p.ImageURL = &imageURL.String }
+		if videoURL.Valid { p.VideoURL = &videoURL.String }
+		if mediaType.Valid { p.MediaType = &mediaType.String }
+		if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+
+		if originalPostID.Valid {
+			var originalPost Post
+			originalPost.PostID = origPostID.String
+			originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }
+			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
+			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+			if origUserName.Valid { originalPost.UserName = origUserName.String }
+			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
+			p.OriginalPost = &originalPost
+		}
+
+		posts = append(posts, p)
+	}
+	
+	bytes, err := json.Marshal(posts)
+	if err != nil {
+		log.Printf("エラー: json.Marshal (following posts) に失敗しました: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
+}
+
 // postCreateHandlerは新しい投稿を作成します。
-// main.go の postCreateHandler 関数をこれで置き換えてください
 
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -897,6 +1013,20 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(createdPost)
+
+	if !strings.HasPrefix(userID, "bot_") {
+		// Slack通知を非同期で実行
+		go func() {
+			// Slackに投稿する本文が長すぎないように80文字に丸める
+			postContent := requestBody.Content
+			if len([]rune(postContent)) > 80 {
+				postContent = string([]rune(postContent)[:80]) + "..."
+			}
+			
+			slackMsg := fmt.Sprintf("👤 %sさんが新しい投稿をしました:\n>>> %s", createdPost.UserName, postContent)
+			sendSlackNotification(slackMsg)
+		}()
+	}
 }
 
 func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -2950,13 +3080,202 @@ func ogpHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(ogp)
 }
 
-// main関数のmux設定部分をこの内容に置き換えてください
+// WebSocketのメッセージ形式を定義
+type WebSocketMessage struct {
+	Type     string `json:"type"`
+	Content  string `json:"content"`
+	UserName string `json:"user_name"`
+	UserID   string `json:"user_id"`
+}
+
+// WebSocketのクライアントを管理するハブ
+type Hub struct {
+	clients    map[*Client]bool
+	broadcast  chan []byte
+	register   chan *Client
+	unregister chan *Client
+}
+
+// 各WebSocket接続を表すクライアント
+type Client struct {
+	hub      *Hub
+	conn     *websocket.Conn
+	send     chan []byte
+	userName string
+	userID   string
+}
+
+// グローバルなハブを生成
+var hub = newHub()
+
+func newHub() *Hub {
+	return &Hub{
+		broadcast:  make(chan []byte),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		clients:    make(map[*Client]bool),
+	}
+}
+
+// Hubをゴルーチンとして実行
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.clients[client] = true
+		case client := <-h.unregister:
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+			}
+		case message := <-h.broadcast:
+			for client := range h.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client)
+				}
+			}
+		}
+	}
+}
+
+// WebSocketのコネクションをアップグレードするための設定
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	// クロスオリジンからの接続を許可する
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+// クライアントからのメッセージを読み取り、ハブにブロードキャストする
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+	for {
+		_, message, err := c.conn.ReadMessage()
+		if err != nil {
+			log.Printf("error: %v", err)
+			break
+		}
+		// メッセージに送信者情報を付加してブロードキャスト
+		var msg WebSocketMessage
+		if err := json.Unmarshal(message, &msg); err == nil {
+			msg.UserName = c.userName
+			msg.UserID = c.userID
+			jsonMsg, _ := json.Marshal(msg)
+			c.hub.broadcast <- jsonMsg
+		}
+	}
+}
+
+// ハブからのメッセージをクライアントに書き込む
+func (c *Client) writePump() {
+	defer func() {
+		c.conn.Close()
+	}()
+	for {
+		message, ok := <-c.send
+		if !ok {
+			// ハブがチャネルを閉じた
+			c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+		c.conn.WriteMessage(websocket.TextMessage, message)
+	}
+}
+
+func serveWs(w http.ResponseWriter, r *http.Request) {
+	// --- ▼▼▼ 新しい認証ロジック ▼▼▼ ---
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		log.Println("WS Error: Token is required in query parameter")
+		http.Error(w, "Token is required", http.StatusUnauthorized)
+		return
+	}
+
+	token, err := firebaseAuth.VerifyIDToken(context.Background(), tokenStr)
+	if err != nil {
+		log.Printf("WS Error: error verifying ID token: %v\n", err)
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+	userID := token.UID
+	// --- ▲▲▲ 新しい認証ロジックここまで ▲▲▲ ---
+
+	var userName string
+	err = db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
+	if err != nil {
+		userName = "名無しさん"
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	client := &Client{
+		hub:      hub,
+		conn:     conn,
+		send:     make(chan []byte, 256),
+		userName: userName,
+		userID:   userID,
+	}
+	client.hub.register <- client
+
+	go client.writePump()
+	go client.readPump()
+}
+
+// main.go
+
+// sendSlackNotification は、指定されたメッセージをSlackに送信します。
+func sendSlackNotification(message string) {
+	webhookURL := os.Getenv("SLACK_WEBHOOK_URL")
+	if webhookURL == "" {
+		log.Println("警告: SLACK_WEBHOOK_URLが設定されていないため、Slack通知をスキップします。")
+		return
+	}
+
+	// Slackに送信するJSONペイロードを作成
+	payload := map[string]string{"text": message}
+	jsonValue, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Slack通知のJSON作成エラー: %v", err)
+		return
+	}
+
+	// HTTP POSTリクエストを作成して送信
+	resp, err := http.Post(webhookURL, "application/json", strings.NewReader(string(jsonValue)))
+	if err != nil {
+		log.Printf("Slack通知の送信エラー: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Slack通知の送信に失敗しました。ステータス: %s, ボディ: %s", resp.Status, string(body))
+	} else {
+		log.Println("Slack通知を正常に送信しました。")
+	}
+}
+
 func main() {
     log.Println("main 関数を開始します...")
+
+	go hub.run() // WebSocketハブをバックグラウンドで起動
+
     mux := http.NewServeMux()
 
 	// --- 認証がオプショナルなエンドポイント ---
 	mux.Handle("/posts", authOptionalMiddleware(http.HandlerFunc(postsGetHandler)))
+	mux.Handle("/api/posts/following", authMiddleware(http.HandlerFunc(followingPostsGetHandler))) // ★ この行を追加
 	mux.Handle("/api/post/", authOptionalMiddleware(http.HandlerFunc(postGetHandler)))
 	mux.Handle("/api/posts/replies/", authOptionalMiddleware(http.HandlerFunc(repliesGetHandler)))
 	mux.Handle("/api/posts/quote_retweets/", authOptionalMiddleware(http.HandlerFunc(quoteRetweetsGetHandler)))
@@ -2993,9 +3312,10 @@ func main() {
 	mux.HandleFunc("/api/bot/create-and-post", createNewBotAndPostHandler)
 
 	mux.HandleFunc("/api/trends", trendsHandler)
+
+
+	mux.HandleFunc("/api/space/ws", serveWs)
 	
-
-
 	// --- 古い/userエンドポイント（互換性のために残す） ---
 	mux.HandleFunc("/user", handler)
 
@@ -3033,6 +3353,8 @@ func main() {
         log.Fatalf("致命的エラー: ListenAndServe に失敗しました: %v", err)
     }
 }
+
+
 func closeDBWithSysCall() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
