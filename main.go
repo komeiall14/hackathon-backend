@@ -36,12 +36,12 @@ type UserResForHTTPGet struct {
     Name             string  `json:"name"`
     Age              *int    `json:"age"`
     FirebaseUID      *string `json:"firebase_uid"`
-    Bio              *string `json:"bio"`               // ★ 追加
-    ProfileImageURL  *string `json:"profile_image_url"` // ★ 追加
-    HeaderImageURL   *string `json:"header_image_url"`  // ★ 追加
-	FollowingCount   int     `json:"following_count"`   // ▼▼▼ この行を追加
-    FollowerCount    int     `json:"follower_count"`    // ▼▼▼ この行を追加
-    IsFollowing      bool    `json:"is_following"`      // ▼▼▼ この行を追加
+    Bio              *string `json:"bio"`               
+    ProfileImageURL  *string `json:"profile_image_url"` 
+    HeaderImageURL   *string `json:"header_image_url"`  
+	FollowingCount   int     `json:"following_count"`   
+    FollowerCount    int     `json:"follower_count"`    
+    IsFollowing      bool    `json:"is_following"`      
     IsMe             bool    `json:"is_me"` 
 	
 }
@@ -54,8 +54,8 @@ type Post struct {
 	UserProfileImageURL *string `json:"user_profile_image_url"`
 	Content             *string `json:"content"`
 	ImageURL            *string `json:"image_url"`
-	VideoURL            *string `json:"video_url"`   // ★ この行を追加
-	MediaType           *string `json:"media_type"`  // ★ この行を追加
+	VideoURL            *string `json:"video_url"`   
+	MediaType           *string `json:"media_type"`  
 	CreatedAt           string  `json:"created_at"`
 	LikeCount           int     `json:"like_count"`
 	IsLikedByMe         bool    `json:"is_liked_by_me"`
@@ -64,13 +64,9 @@ type Post struct {
 	IsRetweetedByMe     bool    `json:"is_retweeted_by_me"`
 	IsBookmarkedByMe    bool    `json:"is_bookmarked_by_me"`
 	OriginalPost        *Post   `json:"original_post,omitempty"`
-	BadCount            int     `json:"bad_count"`          // ★ 追加
+	BadCount            int     `json:"bad_count"`          
     IsBaddedByMe        bool    `json:"is_badded_by_me"`  
 }
-
-// main.go
-
-// ... Post 構造体の下あたりに追加 ...
 
 type Message struct {
     ID            string `json:"id"`
@@ -99,10 +95,6 @@ type EvaluateExplanationResponse struct {
 	Review string `json:"review"`
 }
 
-
-
-// main.go の型定義あたりに追加
-
 type NotificationResponse struct {
 	ID        string    `json:"id"`
 	Type      string    `json:"type"`
@@ -111,8 +103,6 @@ type NotificationResponse struct {
 	IsRead    bool      `json:"is_read"`
 	CreatedAt string `json:"created_at"`
 }
-
-// main.go
 
 // OGP情報を格納する構造体
 type OGPResponse struct {
@@ -278,7 +268,6 @@ func init() {
 		serviceAccountKey = "term7-459800-firebase-adminsdk-fbsvc-869b36b213.json"
 	}
 
-	// ★★★ このログを追加 ★★★
 	// 実際にどのパスでファイルを読み込もうとしているかを確認するためのログ
 	log.Printf("Firebase資格情報ファイルの読み込みを試みます: path=%s\n", serviceAccountKey)
 
@@ -299,8 +288,6 @@ func init() {
 	log.Println("✅ Firebase Admin SDKの初期化に成功しました。")
 }
 
-// main.go の handler 関数
-
 func handler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
 
@@ -309,9 +296,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		if name != "" {
 			log.Printf("特定ユーザー検索を開始します: name=%s\n", name)
-			// ▼▼▼ 変更箇所（特定ユーザー検索）▼▼▼
 			rows, err := db.Query("SELECT id, name, age, firebase_uid, profile_image_url FROM user WHERE name = ?", name)
-			// ▲▲▲ 変更ここまで ▲▲▲
 			if err != nil {
 				log.Printf("エラー: db.Query (name=%s) に失敗しました。エラー: %v\n", name, err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -322,9 +307,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			users := make([]UserResForHTTPGet, 0)
 			for rows.Next() {
 				var u UserResForHTTPGet
-				// ▼▼▼ 変更箇所（特定ユーザー検索）▼▼▼
 				if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID, &u.ProfileImageURL); err != nil {
-				// ▲▲▲ 変更ここまで ▲▲▲
 					log.Printf("エラー: rows.Scan (特定ユーザー検索) に失敗しました。エラー: %v\n", err)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
@@ -350,9 +333,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Println("全ユーザー検索を開始します...")
-		// ▼▼▼ 変更箇所（全ユーザー検索）▼▼▼
 		rows, err := db.Query("SELECT id, name, age, firebase_uid, profile_image_url FROM user")
-		// ▲▲▲ 変更ここまで ▲▲▲
 		if err != nil {
 			log.Printf("エラー: db.Query (all users) に失敗しました。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -363,9 +344,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		users := make([]UserResForHTTPGet, 0)
 		for rows.Next() {
 			var u UserResForHTTPGet
-			// ▼▼▼ 変更箇所（全ユーザー検索）▼▼▼
 			if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID, &u.ProfileImageURL); err != nil {
-			// ▲▲▲ 変更ここまで ▲▲▲
 				log.Printf("エラー: rows.Scan (all users) に失敗しました。エラー: %v\n", err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
@@ -389,7 +368,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Write(bytes)
 
 	case http.MethodPost:
-		// (POSTメソッドの処理は変更なし)
 		log.Println("ユーザー作成処理を開始します...")
 		var newUser UserResForHTTPGet
 		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
@@ -444,7 +422,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
 
 	case http.MethodDelete:
-		// (DELETEメソッドの処理は変更なし)
 		log.Println("ユーザー削除処理を開始します...")
 
 		userId := r.URL.Query().Get("id")
@@ -522,7 +499,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	firebaseUID := token.UID
-	log.Printf("Firebase UID 受信: %s", firebaseUID)  // ←★ここを追加
+	log.Printf("Firebase UID 受信: %s", firebaseUID) 
 
 	// name/picture を安全に取得
 	var userName, profileImageURL string
@@ -551,7 +528,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow("SELECT id FROM user WHERE firebase_uid = ?", firebaseUID).Scan(&dbUserID)
 
 	if err == sql.ErrNoRows {
-		log.Printf("新規ユーザーとして作成を試みます: firebase_uid=%s", firebaseUID)  // ←★ここもデバッグに役立ちます
+		log.Printf("新規ユーザーとして作成を試みます: firebase_uid=%s", firebaseUID)  
 		newULID := ulid.Make().String()
 		_, err = tx.Exec(
 			"INSERT INTO user (id, firebase_uid, name, profile_image_url) VALUES (?, ?, ?, ?)",
@@ -589,9 +566,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "ログイン成功"})
 }
-// main.go
+
 // postGetHandlerは特定の1件の投稿を取得します。
-// main.go の postGetHandler 関数を、この内容に丸ごと置き換えてください
 
 func postGetHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
@@ -629,7 +605,6 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
         WHERE p.post_id = ?
     `
 	
-	// ★★★ 修正点1: 引数に currentUserID を1つ追加 ★★★
 	row := db.QueryRow(query, currentUserID, currentUserID, currentUserID, currentUserID, postID)
 
 	var p Post
@@ -637,7 +612,6 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 	var origCreatedAt sql.NullTime
 
-	// ★★★ 修正点2: Scanの引数に &p.BadCount, &p.IsBaddedByMe を追加 ★★★
 	err := row.Scan(
 		&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 		&p.UserName, &userProfileImageURL,
@@ -697,8 +671,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- ▼▼▼ ここからが修正・追加箇所 ▼▼▼ ---
-
 	// クエリパラメータからlimitとoffsetを取得
 	limitStr := r.URL.Query().Get("limit")
 	offsetStr := r.URL.Query().Get("offset")
@@ -721,7 +693,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 		currentUserID = userID
 	}
 	
-	// SQLクエリに LIMIT と OFFSET を追加
 	query := `
         SELECT
             p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
@@ -758,7 +729,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	// ...これ以降のScanロジックは変更なし...
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
@@ -766,7 +736,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
-		// ★ 修正: Scanの引数に &videoURL, &mediaType を追加
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
@@ -818,7 +787,6 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-// main.go の postsGetHandler の近くにこの関数を追加してください
 
 func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -874,7 +842,6 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
         LIMIT ? OFFSET ?
     `
 
-	// db.Queryに渡す引数を修正
 	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, currentUserID, currentUserID, limit, offset)
 	if err != nil {
 		log.Printf("エラー: db.Query (following posts) に失敗しました: %v", err)
@@ -883,7 +850,6 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	// postsGetHandlerからスキャンとJSONエンコードのロジックをコピー
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
@@ -939,7 +905,6 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-// main.go の postCreateHandler をこの内容に置き換えてください
 
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -993,7 +958,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		originalPostIdToSave.Valid = true
 	}
 
-	postID := ulid.Make().String() // ★ post_idの生成方法を他の箇所と統一
+	postID := ulid.Make().String() 
 
 	_, err = db.Exec(
 		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, video_url, media_type, original_post_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1027,22 +992,19 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
         WHERE p.post_id = ?
     `
-	// ★ 修正: QueryRowの引数を5つに修正
 	row := db.QueryRow(query, userID, userID, userID, userID, postID)
 
 	var content, imageURL, videoURL, mediaType, resOriginalPostID, userProfileImageURL sql.NullString
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 	var origCreatedAt sql.NullTime
 
-	// ★★★ ここが修正箇所です ★★★
-	// Scanの引数に &createdPost.BadCount と &createdPost.IsBaddedByMe を追加しました
 	err = row.Scan(
 		&createdPost.PostID, &createdPost.UserID, &content, &imageURL, &videoURL, &mediaType, &createdPost.CreatedAt, &resOriginalPostID,
 		&createdPost.UserName, &userProfileImageURL,
 		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 		&origUserName, &origUserProfileImageURL,
 		&createdPost.LikeCount, &createdPost.IsLikedByMe,
-		&createdPost.BadCount, &createdPost.IsBaddedByMe, // この2つを追加
+		&createdPost.BadCount, &createdPost.IsBaddedByMe, 
 		&createdPost.ReplyCount,
 		&createdPost.RetweetCount, &createdPost.IsRetweetedByMe,
 		&createdPost.IsBookmarkedByMe,
@@ -1077,7 +1039,6 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		err := db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", originalPostIdToSave.String).Scan(&originalPostAuthorID)
 		
 		if err != nil {
-			// ここでのエラーはログに記録するのみで、メインの処理は続行させる
 			log.Printf("引用RTの通知作成のため、元の投稿の作者取得に失敗: %v", err)
 		} else {
 			// 自分自身を引用した場合は通知しない
@@ -1166,8 +1127,6 @@ func postDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// main.go の likeHandler 関数をこれで置き換えてください
-
 func likeHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
 	if len(pathSegments) < 5 {
@@ -1188,7 +1147,6 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 		likeID := ulid.Make().String()
 		_, err := db.Exec("INSERT INTO likes (like_id, user_id, post_id) VALUES (?, ?, ?)", likeID, userID, postID)
 		
-		// ▼▼▼ エラーハンドリングをこのブロックに修正 ▼▼▼
 		if err != nil {
 			// エラーがmysqlの特定のエラーかチェック
 			if mysqlErr, ok := err.(*mysql.MySQLError); ok {
@@ -1205,7 +1163,6 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
-		// ▲▲▲ ここまで修正 ▲▲▲
 
 		var postAuthorID string
 		// いいねされた投稿の作者を取得
@@ -1245,8 +1202,6 @@ func likeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// main.go の likeHandler の近くにこの関数を追加
-
 func badHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
 	if len(pathSegments) < 5 {
@@ -1264,7 +1219,6 @@ func badHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		badID := ulid.Make().String()
-		// ★ "likes" テーブルを "bads" テーブルに、"like_id" を "bad_id" に変更
 		_, err := db.Exec("INSERT INTO bads (bad_id, user_id, post_id) VALUES (?, ?, ?)", badID, userID, postID)
 		
 		if err != nil {
@@ -1284,7 +1238,6 @@ func badHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("よくないね成功: user_id=%s, post_id=%s", userID, postID)
 
 	case http.MethodDelete:
-		// ★ "likes" テーブルを "bads" テーブルに変更
 		_, err := db.Exec("DELETE FROM bads WHERE user_id = ? AND post_id = ?", userID, postID)
 		if err != nil {
 			log.Printf("エラー: db.Exec (delete bad) に失敗しました: %v", err)
@@ -1298,8 +1251,6 @@ func badHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
 	}
 }
-
-// main.go の replyCreateHandler 関数を、この内容に丸ごと置き換えてください
 
 func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1365,7 +1316,6 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// ▼▼▼ ここからが新しく追加・修正したロジックです ▼▼▼
 	
 	var parentPostAuthorID, parentPostAuthorName, parentPostContent sql.NullString
     // 返信先の投稿（親投稿）の作者ID、名前、内容を取得
@@ -1374,7 +1324,7 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
         log.Printf("リプライ通知、またはAI自動返信のため親投稿の作者取得エラー: %v", err)
     } else {
-		// --- 1. 元の投稿者への通知（既存のロジック） ---
+		// --- 1. 元の投稿者への通知 ---
         if parentPostAuthorID.Valid && parentPostAuthorID.String != userID {
             notificationID := ulid.Make().String()
             _, err := db.Exec(
@@ -1445,8 +1395,6 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 		}
     }
 
-	// ▲▲▲ 修正はここまでです ▲▲▲
-
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"reply_id": replyID})
 	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s\n", replyID, parentPostID)
@@ -1492,15 +1440,13 @@ func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 		var p Post
 		var userName, profileImageURL, content, imageURL, videoURL, mediaType sql.NullString
 		
-		// ▼▼▼ この rows.Scan の行を修正しました ▼▼▼
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &userName, &profileImageURL, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt,
 			&p.LikeCount, &p.IsLikedByMe,
-			&p.BadCount, &p.IsBaddedByMe, // ★ bad_count, is_badded_by_me を追加
+			&p.BadCount, &p.IsBaddedByMe, 
 			&p.ReplyCount, 
 			&p.IsBookmarkedByMe,
 		)
-		// ▲▲▲ 修正ここまで ▲▲▲
 
 		if err != nil {
 			log.Printf("エラー: rows.Scan (replies) に失敗しました: %v", err)
@@ -1586,9 +1532,6 @@ func geminiSuggestReplyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// main.go
-
-// userPostsHandlerを、この内容に丸ごと置き換えてください
 
 func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1677,7 +1620,6 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
 			if origCreatedAt.Valid { 
 				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
-				// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
 				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
 			}
 			if origUserName.Valid { originalPost.UserName = origUserName.String }
@@ -1748,9 +1690,6 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"imageUrl": publicURL})
 	log.Printf("画像アップロード成功: %s", publicURL)
 }
-
-// main.go にこのハンドラを新規追加してください
-// (imageUploadHandlerの近くに置くと分かりやすいです)
 
 func videoUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1844,9 +1783,6 @@ func authOptionalMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// main.go の getUserProfileHandler 関数をこれで置き換えてください
-
-// main.go の getUserProfileHandler 関数をこれで置き換えてください
 func getUserProfileHandler(w http.ResponseWriter, r *http.Request) {
     pathSegments := strings.Split(r.URL.Path, "/")
     if len(pathSegments) < 4 {
@@ -1865,7 +1801,6 @@ func getUserProfileHandler(w http.ResponseWriter, r *http.Request) {
     var age sql.NullInt64
     var firebaseUIDFromDB, bio, profileImageURL, headerImageURL sql.NullString
 
-    // SQLクエリに、フォロー数・フォロワー数・フォロー状態の取得ロジックを追加
     query := `
         SELECT
             id, name, age, firebase_uid, bio, profile_image_url, header_image_url,
@@ -1938,10 +1873,8 @@ func updateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "プロフィールを更新しました。"})
 }
 
-// main.go の userRouterHandler 関数をこれで置き換えてください
 
 // userRouterHandlerは /api/users/ へのリクエストをURLの末尾によってさらに振り分けます。
-// main.go の userRouterHandler 関数をこれで置き換えてください
 
 func userRouterHandler(w http.ResponseWriter, r *http.Request) {
 	// 末尾が /follow の場合
@@ -1968,8 +1901,6 @@ func userRouterHandler(w http.ResponseWriter, r *http.Request) {
 	getUserProfileHandler(w, r)
 }
 
-// main.go の searchHandler 関数をこれで置き換えてください
-
 func searchHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GETメソッドのみが許可されています", http.StatusMethodNotAllowed)
@@ -1990,7 +1921,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		currentUserID = userID
 	}
 
-	// ★ 修正: リツイート情報、お気に入り情報などを全て取得するクエリに修正
 	sqlQuery := `
         SELECT
             p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
@@ -2017,7 +1947,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
             p.created_at DESC
     `
 
-	// ★ 修正: クエリの'?'の数に合わせて引数を修正
 	rows, err := db.Query(sqlQuery, currentUserID, currentUserID, currentUserID, searchTerm, searchTerm)
 	if err != nil {
 		log.Printf("エラー: db.Query (search) に失敗しました: %v", err)
@@ -2033,7 +1962,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
-		// ★ 修正: クエリで取得する全ての列を受け取るようにScanの引数を修正
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
 			&p.UserName, &userProfileImageURL,
@@ -2205,8 +2133,6 @@ func retweetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// main.go にこの関数を追加
-
 // quoteRetweetsGetHandler は、特定の投稿への引用リツイートを一覧で取得します。
 func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -2309,12 +2235,9 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-// main.go にこの関数を追加
-
 // followHandler は、ユーザーのフォロー・アンフォローを処理します。
 func followHandler(w http.ResponseWriter, r *http.Request) {
 
-	// ▼▼▼ この認証チェックを関数の冒頭に追加 ▼▼▼
 	followerID, ok := r.Context().Value(userIDKey).(string)
 	if !ok || followerID == "" {
 		http.Error(w, "この操作には認証が必要です", http.StatusUnauthorized)
@@ -2372,8 +2295,6 @@ func followHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "許可されていないメソッドです", http.StatusMethodNotAllowed)
 	}
 }
-
-// main.go のどこか（例: followHandler の近く）に追加
 
 // getRecommendedUsersHandler は、ログインユーザーがフォローしていないユーザーをランダムに返します
 func getRecommendedUsersHandler(w http.ResponseWriter, r *http.Request) {
@@ -2544,8 +2465,6 @@ func scanUsers(rows *sql.Rows) ([]UserResForHTTPGet, error) {
 	return users, nil
 }
 
-// main.go にこの構造体と関数を追加
-
 // Trend は、トレンドのトピックと投稿数を表します。
 type Trend struct {
     Topic string `json:"topic"`
@@ -2608,7 +2527,6 @@ func trendsHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(trends[:limit])
 }
-// main.go にこの関数を追加
 
 // getConversationsHandlerは、ログインユーザーが参加している会話の一覧を返します。
 func getConversationsHandler(w http.ResponseWriter, r *http.Request) {
@@ -2709,8 +2627,6 @@ func getConversationsHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(conversations)
 }
 
-// main.go にこの関数を追加
-
 // getMessagesHandlerは、特定の会話内のメッセージ一覧を返します。
 func getMessagesHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
@@ -2772,10 +2688,6 @@ func getMessagesHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(messages)
 }
 
-// main.go にこの関数を追加
-
-// main.go の conversationRouterHandler 関数をこの内容に置き換えてください
-
 func conversationRouterHandler(w http.ResponseWriter, r *http.Request) {
 	// 末尾が /messages の場合、メソッドによって処理を分岐
 	if strings.HasSuffix(r.URL.Path, "/messages") {
@@ -2789,11 +2701,9 @@ func conversationRouterHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	// 今後、他の処理（例: 会話情報の取得など）を追加する場合はここに書く
 
 	http.NotFound(w, r)
 }
-// main.go にこの関数を追加
 
 // sendMessageHandler は、特定の会話に新しいメッセージを投稿します。
 func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
@@ -2889,8 +2799,6 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(createdMessage)
 }
 
-
-// main.go にこの関数を追加してください
 
 // startConversationHandler は、指定されたユーザーとの会話を開始、または既存の会話を取得します。
 func startConversationHandler(w http.ResponseWriter, r *http.Request) {
@@ -3000,8 +2908,6 @@ func startConversationHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"conversation_id": newConversationID})
 }
 
-// main.go にこのハンドラを新規追加してください
-
 func getUnreadNotificationCountHandler(w http.ResponseWriter, r *http.Request) {
 	userID, ok := r.Context().Value(userIDKey).(string)
 	if !ok {
@@ -3022,7 +2928,6 @@ func getUnreadNotificationCountHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }
 
-// main.go の getBookmarksHandler をこれで置き換えてください
 
 func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 	currentUserID, ok := r.Context().Value(userIDKey).(string)
@@ -3062,8 +2967,6 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	// ここから先のrows.Next()とScanのループは、postsGetHandlerと全く同じです。
-	// postsGetHandlerからコピーして貼り付けてください。
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
@@ -3101,7 +3004,6 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
 			if origCreatedAt.Valid { 
 				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
-				// ▼▼▼ このデバッグ用ログを一行追加してください ▼▼▼
 				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
 			}
 			if origUserName.Valid { originalPost.UserName = origUserName.String }
@@ -3121,11 +3023,6 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(bytes)
 }
-
-// main.go にこの関数を追加してください
-
-// bookmarkHandler は投稿のお気に入り登録・解除を処理します
-// main.go の bookmarkHandler 関数をこれで置き換えてください
 
 // bookmarkHandler は投稿のお気に入り登録・解除を処理します
 func bookmarkHandler(w http.ResponseWriter, r *http.Request) {
@@ -3194,13 +3091,6 @@ func generateGeminiContent(prompt string) (string, error) {
 	return "", fmt.Errorf("Geminiから有効なコンテンツが生成されませんでした")
 }
 
-
-// createNewBotAndPostHandler は、新しいボットユーザーを生成し、そのユーザーとして投稿します
-// main.go の createNewBotAndPostHandler をこの内容に置き換えてください
-
-// GeminiからのJSONレスポンスを格納するための構造体
-// main.go
-
 // ★ フロントエンドからのリクエストボディをマッピングするための構造体
 type BotRequest struct {
 	Topic string `json:"topic,omitempty"`
@@ -3268,7 +3158,6 @@ func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 		出力はJSONオブジェクトだけにしてください。
 	`, randomAdjective, finalTheme) // ★ 最終決定したテーマをプロンプトに埋め込む
 
-	// ...（これ以降の Gemini呼び出し、DB保存処理は変更なし）...
 	personaJson, err := generateGeminiContent(personaPrompt)
 	if err != nil {
 		log.Printf("Geminiペルソナ生成エラー: %v", err)
@@ -3334,8 +3223,6 @@ func createNewBotAndPostHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "新規ボットによる投稿が作成されました。"})
 }
-
-// main.go にこの関数を丸ごと追加
 
 func ogpHandler(w http.ResponseWriter, r *http.Request) {
 	targetURL := r.URL.Query().Get("url")
@@ -3525,7 +3412,6 @@ func (c *Client) writePump() {
 }
 
 func serveWs(w http.ResponseWriter, r *http.Request) {
-	// --- ▼▼▼ 新しい認証ロジック ▼▼▼ ---
 	tokenStr := r.URL.Query().Get("token")
 	if tokenStr == "" {
 		log.Println("WS Error: Token is required in query parameter")
@@ -3540,7 +3426,6 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := token.UID
-	// --- ▲▲▲ 新しい認証ロジックここまで ▲▲▲ ---
 
 	var userName string
 	err = db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
@@ -3565,8 +3450,6 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 	go client.writePump()
 	go client.readPump()
 }
-
-// main.go
 
 // sendSlackNotification は、指定されたメッセージをSlackに送信します。
 func sendSlackNotification(message string) {
@@ -3645,7 +3528,7 @@ func HandleExperienceAction(w http.ResponseWriter, r *http.Request) {
 		weightedActions := []string{ 
 			"like",
 			"positive_reply",
-			"positive_quote", // 引用リツイートを増やす
+			"positive_quote", 
 			"positive_quote",
 			"positive_quote",
 		}
@@ -3665,7 +3548,7 @@ func HandleExperienceAction(w http.ResponseWriter, r *http.Request) {
 		weightedActions := []string{
 			"bad",
 			"negative_reply",
-			"negative_quote", // 引用リツイートを増やす
+			"negative_quote", 
 			"negative_quote",
 			"negative_quote",
 		}
@@ -3689,7 +3572,6 @@ func HandleExperienceAction(w http.ResponseWriter, r *http.Request) {
 		"message": "Action performed successfully by " + bot.Name,
 		"action":  actionName,
 	})
-	// ▲▲▲ 修正はここまでです ▲▲▲
 }
 // --- Bot Action Helper Functions ---
 
@@ -3704,7 +3586,6 @@ func BotLikePost(postID string, bot BotUser) error {
 		return fmt.Errorf("failed to create like: %w", err)
 	}
 
-	// ▼▼▼ 通知作成ロジックを追加 ▼▼▼
 	var postAuthorID string
 	err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
 	if err != nil {
@@ -3722,7 +3603,6 @@ func BotLikePost(postID string, bot BotUser) error {
 			log.Printf("いいねの通知作成に失敗: %v", err)
 		}
 	}
-	// ▲▲▲ 通知作成ロジックここまで ▲▲▲
 
 	return nil
 }
@@ -3754,7 +3634,6 @@ func BotRetweetPost(postID string, bot BotUser) error {
 	return nil
 }
 
-// main.go の BotPositiveReply をこの内容に置き換えてください
 func BotPositiveReply(postID string, bot BotUser) error {
 	originalContent, err := GetPostContent(postID)
 	if err != nil {
@@ -3814,7 +3693,6 @@ func BotPositiveReply(postID string, bot BotUser) error {
 	return nil
 }
 
-// main.go の BotPositiveQuoteRetweet をこの内容に置き換えてください
 func BotPositiveQuoteRetweet(postID string, bot BotUser) error {
 	originalContent, err := GetPostContent(postID)
 	if err != nil {
@@ -3933,7 +3811,6 @@ func BotNegativeReply(postID string, bot BotUser) error {
 	return nil
 }
 
-// main.go の BotNegativeQuoteRetweet をこの内容に置き換えてください
 func BotNegativeQuoteRetweet(postID string, bot BotUser) error {
 	originalContent, err := GetPostContent(postID)
 	if err != nil {
@@ -3992,7 +3869,6 @@ func BotNegativeQuoteRetweet(postID string, bot BotUser) error {
 	return nil
 }
 
-// GetPostContent is a helper to fetch the content of a single post.
 func GetPostContent(postID string) (string, error) {
     var content sql.NullString
     err := db.QueryRow("SELECT content FROM posts WHERE post_id = ?", postID).Scan(&content)
@@ -4000,7 +3876,7 @@ func GetPostContent(postID string) (string, error) {
         return "", err
     }
     if !content.Valid {
-        return "", nil // Content is NULL, but not an error
+        return "", nil 
     }
     return content.String, nil
 }
@@ -4114,13 +3990,13 @@ func main() {
 	mux.Handle("/api/posts/quote_retweets/", authOptionalMiddleware(http.HandlerFunc(quoteRetweetsGetHandler)))
 
 	mux.Handle("/api/users/", authOptionalMiddleware(http.HandlerFunc(userRouterHandler))) // ★ ユーザー関連はここで一括処理
-	mux.Handle("/api/search", authOptionalMiddleware(http.HandlerFunc(searchHandler))) // ★ この行を追加
+	mux.Handle("/api/search", authOptionalMiddleware(http.HandlerFunc(searchHandler))) 
 
 
 	// --- 認証が必須なエンドポイント ---
 	mux.Handle("/post", authMiddleware(http.HandlerFunc(postCreateHandler)))
 	mux.Handle("/api/post/image", authMiddleware(http.HandlerFunc(imageUploadHandler)))
-	mux.Handle("/api/post/video", authMiddleware(http.HandlerFunc(videoUploadHandler))) // ★ この行を追加
+	mux.Handle("/api/post/video", authMiddleware(http.HandlerFunc(videoUploadHandler))) 
 	mux.Handle("/api/posts/like/", authMiddleware(http.HandlerFunc(likeHandler)))
 	mux.Handle("/api/posts/bad/", authMiddleware(http.HandlerFunc(badHandler)))
 	mux.Handle("/api/posts/reply/", authMiddleware(http.HandlerFunc(replyCreateHandler)))
@@ -4129,7 +4005,7 @@ func main() {
     mux.Handle("/api/bookmarks", authMiddleware(http.HandlerFunc(getBookmarksHandler)))
 
 	mux.Handle("/api/posts/suggest-reply", authMiddleware(http.HandlerFunc(geminiSuggestReplyHandler)))
-	mux.Handle("/api/profile", authMiddleware(http.HandlerFunc(updateUserProfileHandler))) // ★ プロフィール更新用
+	mux.Handle("/api/profile", authMiddleware(http.HandlerFunc(updateUserProfileHandler))) 
 	mux.Handle("/api/notifications", authMiddleware(http.HandlerFunc(getNotificationsHandler)))
 	mux.Handle("/api/notifications/unread-count", authMiddleware(http.HandlerFunc(getUnreadNotificationCountHandler)))
     mux.Handle("/api/notifications/read", authMiddleware(http.HandlerFunc(markNotificationsAsReadHandler)))
