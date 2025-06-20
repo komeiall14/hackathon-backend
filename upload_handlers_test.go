@@ -21,7 +21,7 @@ func TestUploadHandlers(t *testing.T) {
 	})
 
 	t.Run("videoUploadHandler returns error if no file is provided", func(t *testing.T) {
-		// "video"というキーでファイルが送られてこないリクエストを作成する
+		// "video"というキーでファイルが送られてこないリクエストを作成
 		req := httptest.NewRequest("POST", "/api/post/video", nil)
 		rr := httptest.NewRecorder()
 		videoUploadHandler(rr, req)
