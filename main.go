@@ -2431,7 +2431,7 @@ func getRecommendedUsersHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// followingListHandler は、指定されたユーザーがフォローしているユーザーの一覧を返します。
+// followingListHandler は、指定されたユーザーがフォローしているユーザーの一覧を返します
 func followingListHandler(w http.ResponseWriter, r *http.Request) {
 	profileUserID, currentUserID, ok := getUserIDsFromRequest(r)
 	if !ok {
