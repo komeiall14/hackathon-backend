@@ -29,6 +29,7 @@ import (
 	"firebase.google.com/go/v4/auth"
 	"golang.org/x/net/html"
 	"github.com/gorilla/websocket"
+	"errors"
 )
 type UserResForHTTPGet struct {
     Id               string  `json:"id"`
@@ -86,11 +87,19 @@ type Conversation struct {
     UpdatedAt           string             `json:"updated_at"`
 }
 
-var db *sql.DB
-var firebaseAuth *auth.Client
+type EvaluateExplanationRequest struct {
+	OriginalPostID      string `json:"originalPostId"`
+	ExplanationPostID   string `json:"explanationPostId"`
+	OriginalContent     string `json:"originalContent"`
+	ExplanationContent string `json:"explanationContent"`
+}
 
-type contextKey string
-const userIDKey contextKey = "userID"
+type EvaluateExplanationResponse struct {
+	Score  int    `json:"score"`
+	Review string `json:"review"`
+}
+
+
 
 // main.go の型定義あたりに追加
 
@@ -113,7 +122,35 @@ type OGPResponse struct {
 	SiteURL     string `json:"site_url,omitempty"`
 }
 
-// main.go に以下の2つのハンドラを新規追加
+// ExperienceActionRequest は /api/bot/experience-action へのリクエストボディ
+type ExperienceActionRequest struct {
+	TargetPostID string `json:"targetPostId"`
+	Type         string `json:"type"` // "positive" または "negative"
+}
+
+// BotUser はDBから取得するボットユーザーの情報を格納する
+type BotUser struct {
+	ID          string
+	FirebaseUID string
+	Name        string
+}
+
+type Like struct {
+	ID     string
+	UserID string
+	PostID string
+}
+type Bad struct {
+	ID     string
+	UserID string
+	PostID string
+}
+
+var db *sql.DB
+var firebaseAuth *auth.Client
+
+type contextKey string
+const userIDKey contextKey = "userID"
 
 func getNotificationsHandler(w http.ResponseWriter, r *http.Request) {
 	userID, ok := r.Context().Value(userIDKey).(string)
@@ -262,6 +299,8 @@ func init() {
 	log.Println("✅ Firebase Admin SDKの初期化に成功しました。")
 }
 
+// main.go の handler 関数
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("受信リクエスト: Method=%s, URL=%s\n", r.Method, r.URL.String())
 
@@ -270,7 +309,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		if name != "" {
 			log.Printf("特定ユーザー検索を開始します: name=%s\n", name)
-			rows, err := db.Query("SELECT id, name, age, firebase_uid FROM user WHERE name = ?", name)
+			// ▼▼▼ 変更箇所（特定ユーザー検索）▼▼▼
+			rows, err := db.Query("SELECT id, name, age, firebase_uid, profile_image_url FROM user WHERE name = ?", name)
+			// ▲▲▲ 変更ここまで ▲▲▲
 			if err != nil {
 				log.Printf("エラー: db.Query (name=%s) に失敗しました。エラー: %v\n", name, err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -281,7 +322,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			users := make([]UserResForHTTPGet, 0)
 			for rows.Next() {
 				var u UserResForHTTPGet
-				if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID); err != nil {
+				// ▼▼▼ 変更箇所（特定ユーザー検索）▼▼▼
+				if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID, &u.ProfileImageURL); err != nil {
+				// ▲▲▲ 変更ここまで ▲▲▲
 					log.Printf("エラー: rows.Scan (特定ユーザー検索) に失敗しました。エラー: %v\n", err)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
@@ -307,7 +350,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Println("全ユーザー検索を開始します...")
-		rows, err := db.Query("SELECT id, name, age, firebase_uid FROM user")
+		// ▼▼▼ 変更箇所（全ユーザー検索）▼▼▼
+		rows, err := db.Query("SELECT id, name, age, firebase_uid, profile_image_url FROM user")
+		// ▲▲▲ 変更ここまで ▲▲▲
 		if err != nil {
 			log.Printf("エラー: db.Query (all users) に失敗しました。エラー: %v\n", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -318,7 +363,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		users := make([]UserResForHTTPGet, 0)
 		for rows.Next() {
 			var u UserResForHTTPGet
-			if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID); err != nil {
+			// ▼▼▼ 変更箇所（全ユーザー検索）▼▼▼
+			if err := rows.Scan(&u.Id, &u.Name, &u.Age, &u.FirebaseUID, &u.ProfileImageURL); err != nil {
+			// ▲▲▲ 変更ここまで ▲▲▲
 				log.Printf("エラー: rows.Scan (all users) に失敗しました。エラー: %v\n", err)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
@@ -342,6 +389,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Write(bytes)
 
 	case http.MethodPost:
+		// (POSTメソッドの処理は変更なし)
 		log.Println("ユーザー作成処理を開始します...")
 		var newUser UserResForHTTPGet
 		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
@@ -396,6 +444,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"id": newId})
 
 	case http.MethodDelete:
+		// (DELETEメソッドの処理は変更なし)
 		log.Println("ユーザー削除処理を開始します...")
 
 		userId := r.URL.Query().Get("id")
@@ -723,10 +772,10 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.BadCount,        // ★ 追加
-    		&p.IsBaddedByMe,  
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -847,10 +896,10 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.BadCount,        // ★ 追加
-    		&p.IsBaddedByMe,  
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -890,7 +939,7 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-// postCreateHandlerは新しい投稿を作成します。
+// main.go の postCreateHandler をこの内容に置き換えてください
 
 func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -944,7 +993,7 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		originalPostIdToSave.Valid = true
 	}
 
-	postID := ulid.Make().String()
+	postID := ulid.Make().String() // ★ post_idの生成方法を他の箇所と統一
 
 	_, err = db.Exec(
 		"INSERT INTO posts (post_id, user_id, user_name, content, image_url, video_url, media_type, original_post_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -956,9 +1005,8 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ▼▼▼ 作成した投稿の完全なデータを取得して返すロジック（ここを修正）▼▼▼
+	// 作成した投稿の完全なデータを取得して返すロジック
 	var createdPost Post
-	// ★ 修正: video_url, media_type をSELECT句に追加
 	query := `
         SELECT
             p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
@@ -967,11 +1015,11 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
             orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            (SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
             EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
-			(SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
-			EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
             EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
@@ -979,19 +1027,23 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
         WHERE p.post_id = ?
     `
-	row := db.QueryRow(query, userID, userID, userID, postID)
+	// ★ 修正: QueryRowの引数を5つに修正
+	row := db.QueryRow(query, userID, userID, userID, userID, postID)
 
 	var content, imageURL, videoURL, mediaType, resOriginalPostID, userProfileImageURL sql.NullString
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 	var origCreatedAt sql.NullTime
 
-	// ★ 修正: Scanの引数に videoURL, mediaType を追加
+	// ★★★ ここが修正箇所です ★★★
+	// Scanの引数に &createdPost.BadCount と &createdPost.IsBaddedByMe を追加しました
 	err = row.Scan(
 		&createdPost.PostID, &createdPost.UserID, &content, &imageURL, &videoURL, &mediaType, &createdPost.CreatedAt, &resOriginalPostID,
 		&createdPost.UserName, &userProfileImageURL,
 		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 		&origUserName, &origUserProfileImageURL,
-		&createdPost.LikeCount, &createdPost.IsLikedByMe, &createdPost.ReplyCount,
+		&createdPost.LikeCount, &createdPost.IsLikedByMe,
+		&createdPost.BadCount, &createdPost.IsBaddedByMe, // この2つを追加
+		&createdPost.ReplyCount,
 		&createdPost.RetweetCount, &createdPost.IsRetweetedByMe,
 		&createdPost.IsBookmarkedByMe,
 	)
@@ -1004,8 +1056,8 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
 
 	if content.Valid { createdPost.Content = &content.String }
 	if imageURL.Valid { createdPost.ImageURL = &imageURL.String }
-	if videoURL.Valid { createdPost.VideoURL = &videoURL.String } // ★ 追加
-	if mediaType.Valid { createdPost.MediaType = &mediaType.String } // ★ 追加
+	if videoURL.Valid { createdPost.VideoURL = &videoURL.String }
+	if mediaType.Valid { createdPost.MediaType = &mediaType.String }
 	if userProfileImageURL.Valid { createdPost.UserProfileImageURL = &userProfileImageURL.String }
 	if resOriginalPostID.Valid {
         var originalPostData Post
@@ -1019,19 +1071,40 @@ func postCreateHandler(w http.ResponseWriter, r *http.Request) {
         createdPost.OriginalPost = &originalPostData
     }
 
+	if originalPostIdToSave.Valid && originalPostIdToSave.String != "" {
+		var originalPostAuthorID string
+		// 引用された元の投稿の作者のIDを取得
+		err := db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", originalPostIdToSave.String).Scan(&originalPostAuthorID)
+		
+		if err != nil {
+			// ここでのエラーはログに記録するのみで、メインの処理は続行させる
+			log.Printf("引用RTの通知作成のため、元の投稿の作者取得に失敗: %v", err)
+		} else {
+			// 自分自身を引用した場合は通知しない
+			if originalPostAuthorID != userID {
+				notificationID := ulid.Make().String()
+				// 新しい通知タイプ 'quote_retweet' で通知を作成
+				_, err := db.Exec(
+					"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'quote_retweet', ?)",
+					notificationID, originalPostAuthorID, userID, originalPostIdToSave.String,
+				)
+				if err != nil {
+					log.Printf("引用RT通知の作成エラー: %v", err)
+				}
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(createdPost)
 
 	if !strings.HasPrefix(userID, "bot_") {
-		// Slack通知を非同期で実行
 		go func() {
-			// Slackに投稿する本文が長すぎないように80文字に丸める
 			postContent := requestBody.Content
 			if len([]rune(postContent)) > 80 {
 				postContent = string([]rune(postContent)[:80]) + "..."
 			}
-			
 			slackMsg := fmt.Sprintf("👤 %sさんが新しい投稿をしました:\n>>> %s", createdPost.UserName, postContent)
 			sendSlackNotification(slackMsg)
 		}()
@@ -1226,6 +1299,8 @@ func badHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// main.go の replyCreateHandler 関数を、この内容に丸ごと置き換えてください
+
 func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		log.Printf("メソッド不允许: /api/posts/reply/ に %s メソッドでアクセスがありました\n", r.Method)
@@ -1275,6 +1350,7 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 	
 	replyID := ulid.Make().String()
 
+	// ユーザーからの返信をデータベースに保存
 	_, err := db.Exec(
 		"INSERT INTO posts (post_id, user_id, user_name, content, parent_post_id) VALUES (?, ?, ?, ?, ?)",
 		replyID,
@@ -1288,30 +1364,93 @@ func replyCreateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-
-	var parentPostAuthorID string
-    err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", parentPostID).Scan(&parentPostAuthorID)
-    if err != nil {
-        log.Printf("リプライ先の投稿作者取得エラー: %v", err)
+	
+	// ▼▼▼ ここからが新しく追加・修正したロジックです ▼▼▼
+	
+	var parentPostAuthorID, parentPostAuthorName, parentPostContent sql.NullString
+    // 返信先の投稿（親投稿）の作者ID、名前、内容を取得
+	err = db.QueryRow("SELECT p.user_id, COALESCE(u.name, p.user_name), p.content FROM posts p LEFT JOIN user u ON p.user_id = u.firebase_uid WHERE p.post_id = ?", parentPostID).Scan(&parentPostAuthorID, &parentPostAuthorName, &parentPostContent)
+    
+	if err != nil {
+        log.Printf("リプライ通知、またはAI自動返信のため親投稿の作者取得エラー: %v", err)
     } else {
-        if parentPostAuthorID != userID {
+		// --- 1. 元の投稿者への通知（既存のロジック） ---
+        if parentPostAuthorID.Valid && parentPostAuthorID.String != userID {
             notificationID := ulid.Make().String()
             _, err := db.Exec(
                 "INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
-                notificationID, parentPostAuthorID, userID, parentPostID,
+                notificationID, parentPostAuthorID.String, userID, parentPostID,
             )
             if err != nil {
                 log.Printf("リプライ通知の作成エラー: %v", err)
             }
         }
+
+		// --- 2. 親投稿の作者がボットの場合、AIが自動で返信する（新しいロジック） ---
+		if parentPostAuthorID.Valid && strings.HasPrefix(parentPostAuthorID.String, "bot_") {
+			// ユーザーへのレスポンスをブロックしないよう、並行処理で実行
+			go func(botAuthorID, botAuthorName, botOriginalPostContent, userReplyContent, userReplyID, userToNotifyID string) {
+				// 3秒待機
+				time.Sleep(3 * time.Second)
+
+				// Geminiに渡すプロンプトを生成
+				prompt := fmt.Sprintf(`あなたは、以下のSNS投稿をした本人（AIボット）です。
+---
+▼ あなたの元の投稿
+「%s」
+---
+このあなたの投稿に対して、あるユーザーから以下の返信が来ました。
+---
+▼ ユーザーからの返信
+「%s」
+---
+このユーザーの返信に対して、元の投稿の流れを踏まえた、自然でそれっぽい短い返信を、あなたのキャラクターになりきって1つだけ生成してください。返信は日本語で、返信文だけを出力してください。`, botOriginalPostContent, userReplyContent)
+
+				// Geminiを使って返信内容を生成
+				aiReplyContent, err := generateGeminiContent(prompt)
+				if err != nil {
+					log.Printf("ボットの自動返信生成に失敗: %v", err)
+					return
+				}
+				aiReplyContent = strings.Trim(aiReplyContent, `"`)
+				aiReplyContent = strings.TrimSpace(aiReplyContent)
+				if aiReplyContent == "" {
+					log.Println("Geminiが空の返信を生成したため、投稿をスキップします。")
+					return
+				}
+
+				// AIが生成した返信をデータベースに保存
+				aiReplyID := ulid.Make().String()
+				_, err = db.Exec(
+					"INSERT INTO posts (post_id, user_id, user_name, content, parent_post_id) VALUES (?, ?, ?, ?, ?)",
+					aiReplyID, botAuthorID, botAuthorName, aiReplyContent, userReplyID,
+				)
+				if err != nil {
+					log.Printf("ボットの自動返信のDB保存に失敗: %v", err)
+					return
+				}
+				log.Printf("ボットの自動返信が成功しました: from_bot=%s, to_reply_of_user=%s", botAuthorID, userToNotifyID)
+
+				// 返信したユーザーに「ボットから返信が来たこと」を通知する
+				notificationToUser_ID := ulid.Make().String()
+				_, err = db.Exec(
+					"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
+					notificationToUser_ID, userToNotifyID, botAuthorID, userReplyID,
+				)
+				if err != nil {
+					log.Printf("ボットの自動返信に関する通知の作成エラー: %v", err)
+				}
+
+			}(parentPostAuthorID.String, parentPostAuthorName.String, parentPostContent.String, requestBody.Content, replyID, userID)
+		}
     }
+
+	// ▲▲▲ 修正はここまでです ▲▲▲
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"reply_id": replyID})
 	log.Printf("リプライ作成成功: reply_id=%s, parent_id=%s\n", replyID, parentPostID)
 }
-
-// main.go の repliesGetHandler 関数を、この内容に丸ごと置き換えてください
 
 func repliesGetHandler(w http.ResponseWriter, r *http.Request) {
 	pathSegments := strings.Split(r.URL.Path, "/")
@@ -1512,10 +1651,10 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.BadCount,        // ★ 追加
-    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -1900,10 +2039,10 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.BadCount,        // ★ 追加
-    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -1945,7 +2084,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // retweetHandlerはリツイートを作成します。
-// retweetHandlerを、この内容に丸ごと置き換えてください
 
 func retweetHandler(w http.ResponseWriter, r *http.Request) {
 	userID, ok := r.Context().Value(userIDKey).(string)
@@ -2005,17 +2143,18 @@ func retweetHandler(w http.ResponseWriter, r *http.Request) {
 		`
 		row := db.QueryRow(query, userID, userID, userID, newPostID)
 
-
-		var content, imageURL, resOriginalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, resOriginalPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
 
 		err = row.Scan(
-			&newRetweet.PostID, &newRetweet.UserID, &content, &imageURL, &newRetweet.CreatedAt, &resOriginalPostID,
+			&newRetweet.PostID, &newRetweet.UserID, &content, &imageURL, &videoURL, &mediaType, &newRetweet.CreatedAt, &resOriginalPostID,
 			&newRetweet.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&newRetweet.LikeCount, &newRetweet.IsLikedByMe, &newRetweet.ReplyCount,
+			&newRetweet.LikeCount, &newRetweet.IsLikedByMe,
+			&newRetweet.BadCount, &newRetweet.IsBaddedByMe,
+			&newRetweet.ReplyCount,
 			&newRetweet.RetweetCount, &newRetweet.IsRetweetedByMe,
 			&newRetweet.IsBookmarkedByMe,
 		)
@@ -2127,10 +2266,10 @@ func quoteRetweetsGetHandler(w http.ResponseWriter, r *http.Request) {
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.BadCount,        // ★ 追加
-    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -2234,7 +2373,63 @@ func followHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// main.go にこの2つの関数を追加
+// main.go のどこか（例: followHandler の近く）に追加
+
+// getRecommendedUsersHandler は、ログインユーザーがフォローしていないユーザーをランダムに返します
+func getRecommendedUsersHandler(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+		return
+	}
+
+	// 自分自身と、自分が既にフォローしているユーザー、そしてボットを除外して、
+	// ランダムに3人取得するクエリ
+	query := `
+		SELECT firebase_uid, name, profile_image_url, bio, id
+		FROM user
+		WHERE firebase_uid != ?
+		  AND firebase_uid NOT LIKE 'bot_%'
+		  AND firebase_uid NOT IN (
+			SELECT following_id FROM follows WHERE follower_id = ?
+		  )
+		ORDER BY RAND()
+		LIMIT 3
+	`
+
+	rows, err := db.Query(query, userID, userID)
+	if err != nil {
+		log.Printf("おすすめユーザーの取得エラー: %v", err)
+		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// UserProfile.tsxのUserProfileData型に合わせてデータを準備
+	type RecommendedUser struct {
+		FirebaseUID     string  `json:"firebase_uid"`
+		Name            string  `json:"name"`
+		ProfileImageURL *string `json:"profile_image_url"`
+		Bio             *string `json:"bio"`
+		ID              string  `json:"id"`
+	}
+
+	users := make([]RecommendedUser, 0)
+	for rows.Next() {
+		var u RecommendedUser
+		// Scanのフィールドをクエリに合わせて修正
+		err := rows.Scan(&u.FirebaseUID, &u.Name, &u.ProfileImageURL, &u.Bio, &u.ID)
+		if err != nil {
+			log.Printf("おすすめユーザーのデータ読み取りエラー: %v", err)
+			continue
+		}
+		users = append(users, u)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
 
 // followingListHandler は、指定されたユーザーがフォローしているユーザーの一覧を返します。
 func followingListHandler(w http.ResponseWriter, r *http.Request) {
@@ -2881,10 +3076,10 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 			&p.UserName, &userProfileImageURL,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
 			&origUserName, &origUserProfileImageURL,
-			&p.LikeCount, &p.IsLikedByMe, &p.ReplyCount,
+			&p.LikeCount, &p.IsLikedByMe,
+			&p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.BadCount,        // ★ 追加
-    		&p.IsBaddedByMe, 
 			&p.IsBookmarkedByMe,
 		)
 		if err != nil {
@@ -3405,6 +3600,505 @@ func sendSlackNotification(message string) {
 	}
 }
 
+func HandleExperienceAction(w http.ResponseWriter, r *http.Request) {
+	var req ExperienceActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.TargetPostID == "" || (req.Type != "positive" && req.Type != "negative") {
+		http.Error(w, "targetPostId and type are required", http.StatusBadRequest)
+		return
+	}
+
+	// 1. ランダムなボットユーザーを1人取得する
+	var bot BotUser
+	// DBから 'bot_'で始まるfirebase_uidを持つユーザーをランダムに1件取得
+	// 注: ORDER BY RAND() はデータ量が多いとパフォーマンスに影響する可能性がありますが、
+	// ボットユーザーの数は限定的なので、ここでは問題になりにくいです。
+	err := db.QueryRow("SELECT id, firebase_uid, name FROM user WHERE firebase_uid LIKE 'bot_%' ORDER BY RAND() LIMIT 1").Scan(&bot.ID, &bot.FirebaseUID, &bot.Name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("体験モード用ボットが見つかりません: %v", err)
+			http.Error(w, "No bot users found in database", http.StatusNotFound)
+			return
+		}
+		log.Printf("ボットユーザーの取得に失敗: %v", err)
+		http.Error(w, "Failed to get bot user", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. リクエストのタイプに応じてアクションを決定し、実行する
+	var actionErr error
+	var actionName string // 実行されたアクション名を格納する変数
+	rand.Seed(time.Now().UnixNano())
+
+	if req.Type == "positive" {
+		// アクション名と関数のマップを定義
+		actionMap := map[string]func(string, BotUser) error{
+			"like":           BotLikePost,
+			
+			"positive_reply": BotPositiveReply,
+			"positive_quote": BotPositiveQuoteRetweet,
+		}
+		// ★★★ 引用リツイートの頻度を上げるための重み付けリスト ★★★
+		weightedActions := []string{ 
+			"like",
+			"positive_reply",
+			"positive_quote", // 引用リツイートを増やす
+			"positive_quote",
+			"positive_quote",
+		}
+
+		// 重み付けリストからランダムにアクション名を選択
+		actionName = weightedActions[rand.Intn(len(weightedActions))] 
+		actionErr = actionMap[actionName](req.TargetPostID, bot)
+
+	} else if req.Type == "negative" {
+		actionMap := map[string]func(string, BotUser) error{
+			"bad":            BotBadPost,
+			
+			"negative_reply": BotNegativeReply,
+			"negative_quote": BotNegativeQuoteRetweet,
+		}
+		// ★★★ 引用リツイートの頻度を上げるための重み付けリスト ★★★
+		weightedActions := []string{
+			"bad",
+			"negative_reply",
+			"negative_quote", // 引用リツイートを増やす
+			"negative_quote",
+			"negative_quote",
+		}
+
+		// 重み付けリストからランダムにアクション名を選択
+		actionName = weightedActions[rand.Intn(len(weightedActions))]
+		actionErr = actionMap[actionName](req.TargetPostID, bot)
+	}
+
+	if actionErr != nil {
+		log.Printf("ボットアクションの実行に失敗: %v", actionErr)
+		http.Error(w, actionErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("ボットアクション成功: Actor=%s, Type=%s, TargetPost=%s, Action=%s", bot.Name, req.Type, req.TargetPostID, actionName)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	// 応答に actionName を含める
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Action performed successfully by " + bot.Name,
+		"action":  actionName,
+	})
+	// ▲▲▲ 修正はここまでです ▲▲▲
+}
+// --- Bot Action Helper Functions ---
+
+// BotLikePost はボットが投稿に「いいね」する
+func BotLikePost(postID string, bot BotUser) error {
+	likeID := ulid.Make().String()
+	_, err := db.Exec("INSERT INTO likes (like_id, user_id, post_id) VALUES (?, ?, ?)", likeID, bot.FirebaseUID, postID)
+	if err != nil {
+		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1062 {
+			return nil
+		}
+		return fmt.Errorf("failed to create like: %w", err)
+	}
+
+	// ▼▼▼ 通知作成ロジックを追加 ▼▼▼
+	var postAuthorID string
+	err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
+	if err != nil {
+		log.Printf("通知作成のため投稿者IDの取得に失敗: %v", err)
+		return nil // 通知が作れなくても、いいね自体は成功しているのでエラーは返さない
+	}
+
+	if postAuthorID != bot.FirebaseUID {
+		notificationID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'like', ?)",
+			notificationID, postAuthorID, bot.FirebaseUID, postID,
+		)
+		if err != nil {
+			log.Printf("いいねの通知作成に失敗: %v", err)
+		}
+	}
+	// ▲▲▲ 通知作成ロジックここまで ▲▲▲
+
+	return nil
+}
+
+// BotBadPost はボットが投稿に「わるいね」する
+func BotBadPost(postID string, bot BotUser) error {
+	badID := ulid.Make().String()
+	_, err := db.Exec("INSERT INTO bads (bad_id, user_id, post_id) VALUES (?, ?, ?)", badID, bot.FirebaseUID, postID)
+	if err != nil {
+		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1062 {
+			return nil
+		}
+		return fmt.Errorf("failed to create bad like: %w", err)
+	}
+	return nil
+}
+
+// BotRetweetPost はボットが投稿をリツイートする
+func BotRetweetPost(postID string, bot BotUser) error {
+	// リツイートは、contentが空でoriginal_post_idに値が入った投稿として表現
+	retweetID := ulid.Make().String()
+	_, err := db.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, original_post_id) VALUES (?, ?, ?, ?)",
+		retweetID, bot.FirebaseUID, bot.Name, postID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create retweet: %w", err)
+	}
+	return nil
+}
+
+// main.go の BotPositiveReply をこの内容に置き換えてください
+func BotPositiveReply(postID string, bot BotUser) error {
+	originalContent, err := GetPostContent(postID)
+	if err != nil {
+		log.Printf("バズり体験: 元投稿の取得に失敗: %v", err)
+		originalContent = "この投稿"
+	}
+
+	prompt := fmt.Sprintf(`
+あなたは日本のSNSが大好きで、とてもポジティブで応援上手なユーザーです。
+以下の投稿に対して、とにかく褒めちぎる、最高にポジティブな短い返信を生成してください。
+
+多様性を出すため、以下のいずれかのパターンで返信してください：
+- 全力で共感する (例: 「わかります！わかりすぎます！」)
+- 才能を絶賛する (例: 「もしかして天才ですか…？」)
+- シンプルに褒める (例: 「最高！」「めっちゃ良い！」)
+- 感謝を伝える (例: 「素敵な投稿をありがとう！」)
+
+絵文字をいくつか使って、楽しそうな雰囲気を出してください。
+生成するのは日本語の短い返信文だけにしてください。
+
+投稿:「%s」`, originalContent)
+
+	content, err := generateGeminiContent(prompt)
+	if err != nil {
+		log.Printf("Geminiによるポジティブ返信の生成に失敗: %v。固定の返信を使用します。", err)
+		replies := []string{"それな！", "めっちゃわかります！", "天才の発想！", "最高です！"}
+		content = replies[rand.Intn(len(replies))]
+	}
+
+	replyID := ulid.Make().String()
+	_, err = db.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, content, parent_post_id) VALUES (?, ?, ?, ?, ?)",
+		replyID, bot.FirebaseUID, bot.Name, content, postID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create positive reply: %w", err)
+	}
+	
+	var postAuthorID string
+	err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
+	if err != nil {
+		log.Printf("通知作成のため投稿者IDの取得に失敗: %v", err)
+		return nil
+	}
+
+	if postAuthorID != bot.FirebaseUID {
+		notificationID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
+			notificationID, postAuthorID, bot.FirebaseUID, postID,
+		)
+		if err != nil {
+			log.Printf("リプライの通知作成に失敗: %v", err)
+		}
+	}
+	
+	return nil
+}
+
+// main.go の BotPositiveQuoteRetweet をこの内容に置き換えてください
+func BotPositiveQuoteRetweet(postID string, bot BotUser) error {
+	originalContent, err := GetPostContent(postID)
+	if err != nil {
+		log.Printf("バズり体験: 元投稿の取得に失敗: %v", err)
+		originalContent = "この投稿"
+	}
+
+	prompt := fmt.Sprintf(`
+あなたは日本のSNSユーザーで、素晴らしい投稿を見つけて興奮しています。
+以下の投稿を引用しながら、その投稿の素晴らしさをフォロワー全員に伝えようとする、熱意のこもった短いコメントを生成してください。
+
+多様性を出すため、以下のいずれかのパターンでコメントしてください：
+- みんなに見てほしいと呼びかける (例: 「みんなこれ見て！最高だから！」)
+- 自分の感想を強く主張する (例: 「個人的に今年一番の投稿です。」)
+- 投稿内容に強く同意する (例: 「わかりすぎる。これぞ真理。」)
+
+絵文字も使って、興奮した感じを出してください。
+生成するのは日本語の短い引用コメント文だけにしてください。
+
+投稿:「%s」`, originalContent)
+
+	content, err := generateGeminiContent(prompt)
+	if err != nil {
+		log.Printf("Geminiによるポジティブ引用RTの生成に失敗: %v。固定の返信を使用します。", err)
+		quotes := []string{"これはみんなに見てほしい！", "本当にこれ。拡散希望！", "名言すぎる..."}
+		content = quotes[rand.Intn(len(quotes))]
+	}
+
+	quoteRTID := ulid.Make().String()
+	_, err = db.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, content, original_post_id) VALUES (?, ?, ?, ?, ?)",
+		quoteRTID, bot.FirebaseUID, bot.Name, content, postID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create positive quote-retweet: %w", err)
+	}
+
+	var postAuthorID string
+	err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
+	if err != nil {
+		log.Printf("通知作成のため投稿者IDの取得に失敗: %v", err)
+		return nil
+	}
+
+	if postAuthorID != bot.FirebaseUID {
+		notificationID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
+			notificationID, postAuthorID, bot.FirebaseUID, postID,
+		)
+		if err != nil {
+			log.Printf("引用リツイートの通知作成に失敗: %v", err)
+		}
+	}
+
+	return nil
+}
+// BotNegativeReply はボットがネガティブな返信をする
+func BotNegativeReply(postID string, bot BotUser) error {
+	originalContent, err := GetPostContent(postID)
+	if err != nil {
+		log.Printf("炎上体験: 元投稿の取得に失敗: %v", err)
+		originalContent = "この投稿" // 取得失敗時は、固定の文言で代用
+	}
+
+	prompt := fmt.Sprintf(`
+あなたは日本のSNSによくいる、少し意地悪で批判的なユーザーです。
+以下の投稿に対して、少しイラっとさせるような、ありきたりな批判的コメント、または的外れな反論を生成してください。
+
+多様性を出すため、以下のいずれかのパターンで返信してください：
+- 単純な否定や反論 (例: 「いや、それは違うでしょ」)
+- 投稿者の意図を勝手に解釈して馬鹿にする (例: 「要するに〇〇ってこと？浅いなー」)
+- 全く関係のない点や誤字を指摘する
+- 上から目線でアドバイスする (例: 「もっと勉強した方がいいですよ」)
+- 冷笑的な態度 (例: 「へー、すごいすごい（棒読み）」)
+
+生成するのは日本語の短い返信文だけにしてください。
+
+投稿:「%s」`, originalContent)
+
+	content, err := generateGeminiContent(prompt)
+	if err != nil {
+		log.Printf("Geminiによる批判的返信の生成に失敗: %v。固定の返信を使用します。", err)
+		// エラー時は以前の固定の返信にフォールバック
+		replies := []string{"は？", "何言ってるの？", "それは違うんじゃないかな。"}
+		content = replies[rand.Intn(len(replies))]
+	}
+
+	replyID := ulid.Make().String()
+	_, err = db.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, content, parent_post_id) VALUES (?, ?, ?, ?, ?)",
+		replyID, bot.FirebaseUID, bot.Name, content, postID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create negative reply: %w", err)
+	}
+	
+	var postAuthorID string
+	err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
+	if err != nil {
+		log.Printf("通知作成のため投稿者IDの取得に失敗: %v", err)
+		return nil
+	}
+
+	if postAuthorID != bot.FirebaseUID {
+		notificationID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
+			notificationID, postAuthorID, bot.FirebaseUID, postID,
+		)
+		if err != nil {
+			log.Printf("リプライの通知作成に失敗: %v", err)
+		}
+	}
+	
+	return nil
+}
+
+// main.go の BotNegativeQuoteRetweet をこの内容に置き換えてください
+func BotNegativeQuoteRetweet(postID string, bot BotUser) error {
+	originalContent, err := GetPostContent(postID)
+	if err != nil {
+		log.Printf("炎上体験: 元投稿の取得に失敗: %v", err)
+		originalContent = "この投稿"
+	}
+
+	prompt := fmt.Sprintf(`
+あなたは日本のSNSによくいる、少し意地悪で批判的なユーザーです。
+以下の投稿を引用しながら、その投稿を小馬鹿にするような、または揚げ足を取るような短いコメントを生成してください。
+
+多様性を出すため、以下のいずれかのパターンでコメントしてください：
+- 皮肉や嫌味 (例: 「これが許されると思ってるのがすごい」)
+- 大げさな呆れ (例: 「え、待って...。この人やばすぎ...」)
+- 問題点を指摘するふり (例: 「色々言いたいことはあるけど、まず〇〇なのが問題」)
+- 謎の決めつけ (例: 「どうせ〇〇なんでしょ」)
+
+生成するのは日本語の短い引用コメント文だけにしてください。
+
+投稿:「%s」`, originalContent)
+
+	content, err := generateGeminiContent(prompt)
+	if err != nil {
+		log.Printf("Geminiによる批判的引用RTの生成に失敗: %v。固定の返信を使用します。", err)
+		quotes := []string{"この人やばすぎる...", "こういう意見があるから世の中は良くならない。", "信じられない。正気？"}
+		content = quotes[rand.Intn(len(quotes))]
+	}
+
+	quoteRTID := ulid.Make().String()
+	_, err = db.Exec(
+		"INSERT INTO posts (post_id, user_id, user_name, content, original_post_id) VALUES (?, ?, ?, ?, ?)",
+		quoteRTID, bot.FirebaseUID, bot.Name, content, postID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create negative quote-retweet: %w", err)
+	}
+
+	var postAuthorID string
+	err = db.QueryRow("SELECT user_id FROM posts WHERE post_id = ?", postID).Scan(&postAuthorID)
+	if err != nil {
+		log.Printf("通知作成のため投稿者IDの取得に失敗: %v", err)
+		return nil
+	}
+
+	if postAuthorID != bot.FirebaseUID {
+		notificationID := ulid.Make().String()
+		_, err = db.Exec(
+			"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'reply', ?)",
+			notificationID, postAuthorID, bot.FirebaseUID, postID,
+		)
+		if err != nil {
+			log.Printf("引用リツイートの通知作成に失敗: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// GetPostContent is a helper to fetch the content of a single post.
+func GetPostContent(postID string) (string, error) {
+    var content sql.NullString
+    err := db.QueryRow("SELECT content FROM posts WHERE post_id = ?", postID).Scan(&content)
+    if err != nil {
+        return "", err
+    }
+    if !content.Valid {
+        return "", nil // Content is NULL, but not an error
+    }
+    return content.String, nil
+}
+
+// HandleEvaluateExplanation は、元の投稿と弁明をGeminiに評価させ、結果を返す
+func HandleEvaluateExplanation(w http.ResponseWriter, r *http.Request) {
+	// 認証済みユーザーであるかを確認
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "この操作には認証が必要です", http.StatusUnauthorized)
+		return
+	}
+
+	// リクエストボディをパース
+	var req EvaluateExplanationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.OriginalContent == "" || req.ExplanationContent == "" || req.OriginalPostID == "" || req.ExplanationPostID == "" {
+		http.Error(w, "必要な情報が不足しています (originalContent, explanationContent, originalPostId, explanationPostId)", http.StatusBadRequest)
+		return
+	}
+
+	// Geminiに評価を依頼するプロンプトを作成
+	prompt := fmt.Sprintf(`
+あなたは、SNSでの炎上を公平にジャッジする評論家です。
+あるユーザーが以下の投稿をして炎上しました。
+
+---
+▼炎上した投稿
+「%s」
+---
+
+その後、ユーザーは以下の「弁明」を投稿しました。
+
+---
+▼弁明の投稿
+「%s」
+---
+
+この「弁明」が、元の投稿内容に対する「反省」「謝罪」「状況説明」として、どれほど的を得ており、誠実さが伝わるものかを評価してください。
+評価基準は以下の通りです。
+- 論点のすり替えや逆ギレ、言い訳に終始していないか。
+- 自身の非を認め、具体的な謝罪の言葉があるか。
+- なぜ元の投稿をしたのか、誤解があったのか等の説明が、言い訳がましくなく、かつ納得できる内容か。
+- 今後の対策や姿勢が示されているか。
+
+以上の基準を総合的に判断し、以下のJSON形式で応答してください。
+- "score": 評価を0点から100点の整数で採点したスコア。70点以上が合格ラインです。
+- "review": なぜそのスコアになったのかの具体的な理由と感想。200字程度の丁寧な文章で記述してください。
+
+出力はJSONオブジェクトだけにしてください。
+`, req.OriginalContent, req.ExplanationContent)
+
+	log.Printf("Geminiに送信する評価プロンプト: %s", prompt)
+
+	// generateGeminiContent 関数を再利用して、評価結果のJSON文字列を取得
+	evaluationJSON, err := generateGeminiContent(prompt)
+	if err != nil {
+		log.Printf("Gemini評価生成エラー: %v", err)
+		http.Error(w, "AIによる評価の生成に失敗しました", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Geminiが生成した評価JSON: %s", evaluationJSON)
+
+	// Geminiの応答からJSON部分だけを抜き出す（```json ... ``` が含まれる場合への対策）
+	re := regexp.MustCompile("(?s)```json\n(.*?)\n```")
+    matches := re.FindStringSubmatch(evaluationJSON)
+    jsonToParse := evaluationJSON
+    if len(matches) > 1 {
+        jsonToParse = matches[1]
+    }
+
+	// JSONを構造体にデコード
+	var evalResponse EvaluateExplanationResponse
+	if err := json.Unmarshal([]byte(jsonToParse), &evalResponse); err != nil {
+		log.Printf("Geminiの評価JSONパースエラー: %v", err)
+		http.Error(w, "AIからの応答解析に失敗しました", http.StatusInternalServerError)
+		return
+	}
+
+	// 評価結果をデータベースに保存
+	_, err = db.Exec(
+		"INSERT INTO explanation_evaluations (original_post_id, explanation_post_id, score, review) VALUES (?, ?, ?, ?)",
+		req.OriginalPostID, req.ExplanationPostID, evalResponse.Score, evalResponse.Review,
+	)
+	if err != nil {
+		log.Printf("評価結果のDB保存エラー: %v", err)
+		// DB保存に失敗しても、評価自体は成功しているので処理は続行し、フロントに結果を返す
+	}
+
+	log.Printf("弁明の評価完了: Score=%d", evalResponse.Score)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(evalResponse)
+}
+
 func main() {
     log.Println("main 関数を開始します...")
 
@@ -3448,6 +4142,11 @@ func main() {
 	mux.Handle("/api/login", http.HandlerFunc(loginHandler))
 
 	mux.Handle("/api/retweet/", authMiddleware(http.HandlerFunc(retweetHandler)))
+
+	mux.Handle("/api/bot/experience-action", authMiddleware(http.HandlerFunc(HandleExperienceAction)))
+	mux.Handle("/api/gemini/evaluate-explanation", authMiddleware(http.HandlerFunc(HandleEvaluateExplanation)))
+
+	mux.Handle("/api/users/recommendations", authMiddleware(http.HandlerFunc(getRecommendedUsersHandler)))
 
 	mux.HandleFunc("/api/bot/create-and-post", createNewBotAndPostHandler)
 
