@@ -2369,7 +2369,7 @@ func followingListHandler(w http.ResponseWriter, r *http.Request) {
 		INNER JOIN follows f ON u.firebase_uid = f.following_id
 		WHERE f.follower_id = ?
 	`
-	rows, err := db.Query(query, currentUserID, currentUserID, profileUserID)
+	rows, err := db.Query(query, currentUserID, profileUserID)
 	if err != nil {
 		log.Printf("フォロー中のユーザー一覧取得エラー: %v", err)
 		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
@@ -2406,7 +2406,7 @@ func followerListHandler(w http.ResponseWriter, r *http.Request) {
 		INNER JOIN follows f ON u.firebase_uid = f.follower_id
 		WHERE f.following_id = ?
 	`
-	rows, err := db.Query(query, currentUserID, currentUserID, profileUserID)
+	rows, err := db.Query(query, currentUserID, profileUserID)
 	if err != nil {
 		log.Printf("フォロワー一覧取得エラー: %v", err)
 		http.Error(w, "サーバーエラー", http.StatusInternalServerError)
@@ -2571,7 +2571,7 @@ func getConversationsHandler(w http.ResponseWriter, r *http.Request) {
         ORDER BY c.updated_at DESC;
     `
 
-    rows, err := db.Query(query, currentUserID, currentUserID)
+    rows, err := db.Query(query, currentUserID)
     if err != nil {
         log.Printf("会話一覧の取得エラー: %v", err)
         http.Error(w, "サーバーエラー", http.StatusInternalServerError)
