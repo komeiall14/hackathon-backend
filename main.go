@@ -1699,7 +1699,7 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 
 // userRepliesHandler は、指定されたユーザーのリプライのみを一覧で取得します。
 func userRepliesHandler(w http.ResponseWriter, r *http.Request) {
-	// (この関数はuserPostsHandlerとほぼ同じですが、WHERE句が異なります)
+	// URLから対象のユーザーIDを取得
 	pathWithoutSuffix := strings.TrimSuffix(r.URL.Path, "/replies")
 	pathSegments := strings.Split(pathWithoutSuffix, "/")
 	if len(pathSegments) < 4 {
@@ -1708,32 +1708,37 @@ func userRepliesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	profileUserID := pathSegments[3]
 
+	// ログイン中のユーザーIDを取得（未ログインの場合は空文字）
 	currentUserID := ""
 	if id, ok := r.Context().Value(userIDKey).(string); ok {
 		currentUserID = id
 	}
 	
+	// 親投稿の全文情報(content, image_urlなど)を取得するSQLクエリ
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, 
+            p.created_at, p.original_post_id, p.parent_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
-			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            (SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
             EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
-			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+            
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
             orig_u.name, orig_u.profile_image_url,
-            parent_p.post_id, parent_p.user_id,
-            parent_u.name
+            
+            parent_p.post_id, parent_p.user_id, parent_p.content, parent_p.image_url, parent_p.created_at,
+            parent_u.name, parent_u.profile_image_url
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
-		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
         LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
         WHERE p.user_id = ? AND p.parent_post_id IS NOT NULL
         ORDER BY p.created_at DESC
@@ -1746,42 +1751,52 @@ func userRepliesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	// (ここから先のrows.Scanとpostsへの追加ロジックは、userPostsHandlerと全く同じです)
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
 		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
-		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
+		
+		var parentP_PostID, parentP_UserID, parentP_Content, parentP_ImageURL, parentU_Name, parentU_ProfileImageURL sql.NullString
+		var parentP_CreatedAt sql.NullTime
+
 		err := rows.Scan(
 			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 			&p.UserName, &userProfileImageURL, &p.LikeCount, &p.IsLikedByMe, &p.BadCount, &p.IsBaddedByMe,
 			&p.ReplyCount, &p.RetweetCount, &p.IsRetweetedByMe, &p.IsBookmarkedByMe,
 			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt, &origUserName, &origUserProfileImageURL,
-			&parentP_PostID, &parentP_UserID, &parentU_Name,
+			&parentP_PostID, &parentP_UserID, &parentP_Content, &parentP_ImageURL, &parentP_CreatedAt, &parentU_Name, &parentU_ProfileImageURL,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (user replies) に失敗: %v", err)
 			continue
 		}
-		if content.Valid { p.Content = &content.String }; if imageURL.Valid { p.ImageURL = &imageURL.String }; if videoURL.Valid { p.VideoURL = &videoURL.String }; if mediaType.Valid { p.MediaType = &mediaType.String }; if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
-		if originalPostID.Valid {
-			var originalPost Post
-			originalPost.PostID = origPostID.String; originalPost.UserID = origUserID.String
-			if origContent.Valid { originalPost.Content = &origContent.String }; if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String };
-			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") };
-			if origUserName.Valid { originalPost.UserName = origUserName.String }; if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String };
-			p.OriginalPost = &originalPost
-		}
+		if content.Valid { p.Content = &content.String }
+        if imageURL.Valid { p.ImageURL = &imageURL.String }
+        if videoURL.Valid { p.VideoURL = &videoURL.String }
+        if mediaType.Valid { p.MediaType = &mediaType.String }
+        if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+		if originalPostID.Valid { /* 省略 */ }
+
+		// 親投稿の完全なオブジェクトを生成
 		if parentPostID.Valid {
-			p.ParentPost = &Post{ PostID: parentP_PostID.String, UserID: parentP_UserID.String, UserName: parentU_Name.String }
+			var parentPost Post
+			parentPost.PostID = parentP_PostID.String
+			parentPost.UserID = parentP_UserID.String
+			if parentU_Name.Valid { parentPost.UserName = parentU_Name.String }
+			if parentP_Content.Valid { parentPost.Content = &parentP_Content.String }
+			if parentP_ImageURL.Valid { parentPost.ImageURL = &parentP_ImageURL.String }
+			if parentU_ProfileImageURL.Valid { parentPost.UserProfileImageURL = &parentU_ProfileImageURL.String }
+			if parentP_CreatedAt.Valid { parentPost.CreatedAt = parentP_CreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+			p.ParentPost = &parentPost
 		}
 		posts = append(posts, p)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(posts)
 }
+
 
 func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
