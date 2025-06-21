@@ -64,6 +64,7 @@ type Post struct {
 	IsRetweetedByMe     bool    `json:"is_retweeted_by_me"`
 	IsBookmarkedByMe    bool    `json:"is_bookmarked_by_me"`
 	OriginalPost        *Post   `json:"original_post,omitempty"`
+	ParentPost          *Post   `json:"parent_post,omitempty"`
 	BadCount            int     `json:"bad_count"`          
     IsBaddedByMe        bool    `json:"is_badded_by_me"`  
 }
@@ -584,11 +585,8 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
-            COALESCE(u.name, p.user_name) AS user_name,
-            u.profile_image_url,
-            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
-            orig_u.name, orig_u.profile_image_url,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
@@ -596,32 +594,46 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+            
+            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+
+            parent_p.post_id, parent_p.user_id, parent_p.content, parent_p.image_url, parent_p.created_at,
+            parent_u.name, parent_u.profile_image_url
         FROM
             posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+        LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
         WHERE p.post_id = ?
     `
 	
 	row := db.QueryRow(query, currentUserID, currentUserID, currentUserID, currentUserID, postID)
 
 	var p Post
-	var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+	var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
+	
 	var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 	var origCreatedAt sql.NullTime
 
+	var parentP_PostID, parentP_UserID, parentP_Content, parentP_ImageURL, parentU_Name, parentU_ProfileImageURL sql.NullString
+	var parentP_CreatedAt sql.NullTime
+
 	err := row.Scan(
-		&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+		&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 		&p.UserName, &userProfileImageURL,
-		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-		&origUserName, &origUserProfileImageURL,
 		&p.LikeCount, &p.IsLikedByMe,
 		&p.BadCount, &p.IsBaddedByMe,
 		&p.ReplyCount,
 		&p.RetweetCount, &p.IsRetweetedByMe,
 		&p.IsBookmarkedByMe,
+		&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+		&origUserName, &origUserProfileImageURL,
+		&parentP_PostID, &parentP_UserID, &parentP_Content, &parentP_ImageURL, &parentP_CreatedAt,
+		&parentU_Name, &parentU_ProfileImageURL,
 	)
 	
 	if err == sql.ErrNoRows {
@@ -653,6 +665,18 @@ func postGetHandler(w http.ResponseWriter, r *http.Request) {
 		if origUserName.Valid { originalPost.UserName = origUserName.String }
 		if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 		p.OriginalPost = &originalPost
+	}
+
+	if parentPostID.Valid {
+		var parentPost Post
+		parentPost.PostID = parentP_PostID.String
+		parentPost.UserID = parentP_UserID.String
+		if parentP_Content.Valid { parentPost.Content = &parentP_Content.String }
+		if parentP_ImageURL.Valid { parentPost.ImageURL = &parentP_ImageURL.String }
+		if parentP_CreatedAt.Valid { parentPost.CreatedAt = parentP_CreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
+		if parentU_Name.Valid { parentPost.UserName = parentU_Name.String }
+		if parentU_ProfileImageURL.Valid { parentPost.UserProfileImageURL = &parentU_ProfileImageURL.String }
+		p.ParentPost = &parentPost
 	}
 	
 	bytes, err := json.Marshal(p)
@@ -695,10 +719,8 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
-            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
-            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
@@ -706,17 +728,22 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            parent_p.post_id, parent_p.user_id,
+            parent_u.name
         FROM
             posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
-        WHERE
-            p.parent_post_id IS NULL
+		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
+		WHERE p.parent_post_id IS NULL --
         ORDER BY
             p.created_at DESC
-        LIMIT ? OFFSET ?  -- この行を追加
+        LIMIT ? OFFSET ?
     `
 
 	// db.Queryにlimitとoffsetを渡す
@@ -732,20 +759,19 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
+		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 			&p.UserName, &userProfileImageURL,
-			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe,
 			&p.BadCount, &p.IsBaddedByMe,
-			&p.ReplyCount,
-			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.IsBookmarkedByMe,
+			&p.ReplyCount, &p.RetweetCount, &p.IsRetweetedByMe, &p.IsBookmarkedByMe,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt, &origUserName, &origUserProfileImageURL,
+			&parentP_PostID, &parentP_UserID, &parentU_Name,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (all posts) に失敗しました: %v", err)
@@ -773,6 +799,14 @@ func postsGetHandler(w http.ResponseWriter, r *http.Request) {
 			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
 		}
+
+        if parentPostID.Valid {
+            p.ParentPost = &Post{
+                PostID:   parentP_PostID.String,
+                UserID:   parentP_UserID.String,
+                UserName: parentU_Name.String,
+            }
+        }
 
 		posts = append(posts, p)
 	}
@@ -816,10 +850,8 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 	// SQLクエリを修正して、フォロー中のユーザー(f.follower_id = ?)と自分自身(p.user_id = ?)の投稿を取得
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
-            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
-            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
@@ -827,16 +859,22 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            parent_p.post_id, parent_p.user_id,
+            parent_u.name
         FROM
             posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
-        LEFT JOIN follows f ON p.user_id = f.following_id -- followsテーブルをJOIN
+        LEFT JOIN follows f ON p.user_id = f.following_id
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
         WHERE
-            p.parent_post_id IS NULL AND (f.follower_id = ? OR p.user_id = ?) -- フォローしている人と自分の投稿に絞り込み
-        GROUP BY p.post_id -- 重複を除外
+            f.follower_id = ? OR p.user_id = ?
+        GROUP BY p.post_id
         ORDER BY
             p.created_at DESC
         LIMIT ? OFFSET ?
@@ -853,20 +891,19 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
+		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 			&p.UserName, &userProfileImageURL,
-			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe,
 			&p.BadCount, &p.IsBaddedByMe,
-			&p.ReplyCount,
-			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.IsBookmarkedByMe,
+			&p.ReplyCount, &p.RetweetCount, &p.IsRetweetedByMe, &p.IsBookmarkedByMe,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt, &origUserName, &origUserProfileImageURL,
+			&parentP_PostID, &parentP_UserID, &parentU_Name,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (following posts) に失敗しました: %v", err)
@@ -891,6 +928,14 @@ func followingPostsGetHandler(w http.ResponseWriter, r *http.Request) {
 			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
 		}
+
+        if parentPostID.Valid {
+            p.ParentPost = &Post{
+                PostID:   parentP_PostID.String,
+                UserID:   parentP_UserID.String,
+                UserName: parentU_Name.String,
+            }
+        }
 
 		posts = append(posts, p)
 	}
@@ -1544,9 +1589,9 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
 		return
 	}
-	userID := pathSegments[3]
+	profileUserID := pathSegments[3]
 
-	log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", userID)
+	log.Printf("特定ユーザーの投稿検索を開始: user_id=%s\n", profileUserID)
 
 	currentUserID := ""
 	if id, ok := r.Context().Value(userIDKey).(string); ok {
@@ -1555,10 +1600,8 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
-            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
-            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
@@ -1566,15 +1609,21 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            parent_p.post_id, parent_p.user_id,
+            parent_u.name
         FROM posts p
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
-        WHERE p.user_id = ? -- ★★★ ここの条件を変更し、リツイートも取得対象に含めます ★★★
+		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
+        WHERE p.user_id = ? AND p.parent_post_id IS NULL --
         ORDER BY p.created_at DESC
     `
-	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, userID)
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, profileUserID)
 	if err != nil {
 		log.Printf("エラー: db.Query (user posts) に失敗: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1585,20 +1634,22 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
+		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 			&p.UserName, &userProfileImageURL,
-			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe,
 			&p.BadCount, &p.IsBaddedByMe,
 			&p.ReplyCount,
 			&p.RetweetCount, &p.IsRetweetedByMe,
 			&p.IsBookmarkedByMe,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
+			&origUserName, &origUserProfileImageURL,
+			&parentP_PostID, &parentP_UserID, &parentU_Name,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (user posts) に失敗: %v", err)
@@ -1618,14 +1669,20 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 			originalPost.UserID = origUserID.String
 			if origContent.Valid { originalPost.Content = &origContent.String }
 			if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String }
-			if origCreatedAt.Valid { 
-				originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00")
-				log.Printf("DEBUG: Original Post Date. Raw: %v, Formatted: %s", origCreatedAt.Time, originalPost.CreatedAt)
-			}
+			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") }
 			if origUserName.Valid { originalPost.UserName = origUserName.String }
 			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
 		}
+
+		if parentPostID.Valid {
+			p.ParentPost = &Post{
+				PostID:   parentP_PostID.String,
+				UserID:   parentP_UserID.String,
+				UserName: parentU_Name.String,
+			}
+		}
+
 		posts = append(posts, p)
 	}
 
@@ -1637,7 +1694,93 @@ func userPostsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(bytes)
-	log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", userID)
+	log.Printf("特定ユーザーの投稿取得リクエスト成功: user_id=%s\n", profileUserID)
+}
+
+// userRepliesHandler は、指定されたユーザーのリプライのみを一覧で取得します。
+func userRepliesHandler(w http.ResponseWriter, r *http.Request) {
+	// (この関数はuserPostsHandlerとほぼ同じですが、WHERE句が異なります)
+	pathWithoutSuffix := strings.TrimSuffix(r.URL.Path, "/replies")
+	pathSegments := strings.Split(pathWithoutSuffix, "/")
+	if len(pathSegments) < 4 {
+		http.Error(w, "ユーザーIDが指定されていません", http.StatusBadRequest)
+		return
+	}
+	profileUserID := pathSegments[3]
+
+	currentUserID := ""
+	if id, ok := r.Context().Value(userIDKey).(string); ok {
+		currentUserID = id
+	}
+	
+	query := `
+        SELECT
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
+            COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
+			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
+            EXISTS(SELECT 1 FROM bads WHERE post_id = p.post_id AND user_id = ?) AS is_badded_by_me,
+            (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
+            (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
+            EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
+			EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            parent_p.post_id, parent_p.user_id,
+            parent_u.name
+        FROM posts p
+        LEFT JOIN user u ON p.user_id = u.firebase_uid
+        LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
+        LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
+        WHERE p.user_id = ? AND p.parent_post_id IS NOT NULL
+        ORDER BY p.created_at DESC
+    `
+	rows, err := db.Query(query, currentUserID, currentUserID, currentUserID, currentUserID, profileUserID)
+	if err != nil {
+		log.Printf("エラー: db.Query (user replies) に失敗: %v", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// (ここから先のrows.Scanとpostsへの追加ロジックは、userPostsHandlerと全く同じです)
+	posts := make([]Post, 0)
+	for rows.Next() {
+		var p Post
+		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
+		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
+		var origCreatedAt sql.NullTime
+		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
+		err := rows.Scan(
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
+			&p.UserName, &userProfileImageURL, &p.LikeCount, &p.IsLikedByMe, &p.BadCount, &p.IsBaddedByMe,
+			&p.ReplyCount, &p.RetweetCount, &p.IsRetweetedByMe, &p.IsBookmarkedByMe,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt, &origUserName, &origUserProfileImageURL,
+			&parentP_PostID, &parentP_UserID, &parentU_Name,
+		)
+		if err != nil {
+			log.Printf("エラー: rows.Scan (user replies) に失敗: %v", err)
+			continue
+		}
+		if content.Valid { p.Content = &content.String }; if imageURL.Valid { p.ImageURL = &imageURL.String }; if videoURL.Valid { p.VideoURL = &videoURL.String }; if mediaType.Valid { p.MediaType = &mediaType.String }; if userProfileImageURL.Valid { p.UserProfileImageURL = &userProfileImageURL.String }
+		if originalPostID.Valid {
+			var originalPost Post
+			originalPost.PostID = origPostID.String; originalPost.UserID = origUserID.String
+			if origContent.Valid { originalPost.Content = &origContent.String }; if origImageURL.Valid { originalPost.ImageURL = &origImageURL.String };
+			if origCreatedAt.Valid { originalPost.CreatedAt = origCreatedAt.Time.Format("2006-01-02T15:04:05Z07:00") };
+			if origUserName.Valid { originalPost.UserName = origUserName.String }; if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String };
+			p.OriginalPost = &originalPost
+		}
+		if parentPostID.Valid {
+			p.ParentPost = &Post{ PostID: parentP_PostID.String, UserID: parentP_UserID.String, UserName: parentU_Name.String }
+		}
+		posts = append(posts, p)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(posts)
 }
 
 func imageUploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -1877,27 +2020,28 @@ func updateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 // userRouterHandlerは /api/users/ へのリクエストをURLの末尾によってさらに振り分けます。
 
 func userRouterHandler(w http.ResponseWriter, r *http.Request) {
-	// 末尾が /follow の場合
 	if strings.HasSuffix(r.URL.Path, "/follow") {
 		followHandler(w, r)
 		return
 	}
-	// 末尾が /following の場合
 	if strings.HasSuffix(r.URL.Path, "/following") {
 		followingListHandler(w, r)
 		return
 	}
-	// 末尾が /followers の場合
 	if strings.HasSuffix(r.URL.Path, "/followers") {
 		followerListHandler(w, r)
 		return
 	}
-	// 末尾が /posts の場合
 	if strings.HasSuffix(r.URL.Path, "/posts") {
 		userPostsHandler(w, r)
 		return
 	}
-	// それ以外の場合は、ユーザープロフィール取得として処理
+	// ▼▼▼ このifブロックを追加 ▼▼▼
+	if strings.HasSuffix(r.URL.Path, "/replies") {
+		userRepliesHandler(w, r)
+		return
+	}
+	// ▲▲▲ 追加ここまで ▲▲▲
 	getUserProfileHandler(w, r)
 }
 
@@ -1923,10 +2067,8 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 
 	sqlQuery := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
-            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
-            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
@@ -1934,15 +2076,21 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-            EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me
+            EXISTS(SELECT 1 FROM bookmarks WHERE post_id = p.post_id AND user_id = ?) AS is_bookmarked_by_me,
+			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            parent_p.post_id, parent_p.user_id,
+            parent_u.name
         FROM
             posts p
         LEFT JOIN
             user u ON p.user_id = u.firebase_uid
 		LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
+		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
         WHERE
-            p.parent_post_id IS NULL AND (p.content LIKE ? OR u.name LIKE ?)
+            p.content LIKE ? OR u.name LIKE ?
         ORDER BY
             p.created_at DESC
     `
@@ -1958,20 +2106,19 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
+		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 			&p.UserName, &userProfileImageURL,
-			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe,
 			&p.BadCount, &p.IsBaddedByMe,
-			&p.ReplyCount,
-			&p.RetweetCount, &p.IsRetweetedByMe,
-			&p.IsBookmarkedByMe,
+			&p.ReplyCount, &p.RetweetCount, &p.IsRetweetedByMe, &p.IsBookmarkedByMe,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt, &origUserName, &origUserProfileImageURL,
+			&parentP_PostID, &parentP_UserID, &parentU_Name,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (search) に失敗しました: %v", err)
@@ -1996,6 +2143,14 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 			if origUserProfileImageURL.Valid { originalPost.UserProfileImageURL = &origUserProfileImageURL.String }
 			p.OriginalPost = &originalPost
 		}
+
+        if parentPostID.Valid {
+            p.ParentPost = &Post{
+                PostID:   parentP_PostID.String,
+                UserID:   parentP_UserID.String,
+                UserName: parentU_Name.String,
+            }
+        }
 
 		posts = append(posts, p)
 	}
@@ -2938,10 +3093,8 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 
 	query := `
         SELECT
-            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id,
+            p.post_id, p.user_id, p.content, p.image_url, p.video_url, p.media_type, p.created_at, p.original_post_id, p.parent_post_id,
             COALESCE(u.name, p.user_name) AS user_name, u.profile_image_url,
-            orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
-            orig_u.name, orig_u.profile_image_url,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.post_id) AS like_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.post_id AND user_id = ?) AS is_liked_by_me,
 			(SELECT COUNT(*) FROM bads WHERE post_id = p.post_id) AS bad_count,
@@ -2949,13 +3102,19 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
             (SELECT COUNT(*) FROM posts WHERE parent_post_id = p.post_id) AS reply_count,
             (SELECT COUNT(*) FROM posts WHERE original_post_id = p.post_id) AS retweet_count,
             EXISTS(SELECT 1 FROM posts WHERE original_post_id = p.post_id AND user_id = ? AND content IS NULL) AS is_retweeted_by_me,
-            TRUE AS is_bookmarked_by_me -- ★ ブックマーク一覧なので常にtrue
+            TRUE AS is_bookmarked_by_me,
+			orig_p.post_id, orig_p.user_id, orig_p.content, orig_p.image_url, orig_p.created_at,
+            orig_u.name, orig_u.profile_image_url,
+            parent_p.post_id, parent_p.user_id,
+            parent_u.name
         FROM posts p
-        JOIN bookmarks b ON p.post_id = b.post_id -- ★ JOINでブックマークされた投稿に絞る
+        JOIN bookmarks b ON p.post_id = b.post_id
         LEFT JOIN user u ON p.user_id = u.firebase_uid
         LEFT JOIN posts AS orig_p ON p.original_post_id = orig_p.post_id
         LEFT JOIN user AS orig_u ON orig_p.user_id = orig_u.firebase_uid
-        WHERE b.user_id = ? -- ★ ログインユーザーのブックマークのみ
+		LEFT JOIN posts AS parent_p ON p.parent_post_id = parent_p.post_id
+        LEFT JOIN user AS parent_u ON parent_p.user_id = parent_u.firebase_uid
+        WHERE b.user_id = ?
         ORDER BY b.created_at DESC
     `
 
@@ -2970,20 +3129,20 @@ func getBookmarksHandler(w http.ResponseWriter, r *http.Request) {
 	posts := make([]Post, 0)
 	for rows.Next() {
 		var p Post
-		var content, imageURL, videoURL, mediaType, originalPostID, userProfileImageURL sql.NullString
+		var content, imageURL, videoURL, mediaType, originalPostID, parentPostID, userProfileImageURL sql.NullString
 		var origPostID, origUserID, origContent, origImageURL, origUserName, origUserProfileImageURL sql.NullString
 		var origCreatedAt sql.NullTime
+		var parentP_PostID, parentP_UserID, parentU_Name sql.NullString
 
 		err := rows.Scan(
-			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID,
+			&p.PostID, &p.UserID, &content, &imageURL, &videoURL, &mediaType, &p.CreatedAt, &originalPostID, &parentPostID,
 			&p.UserName, &userProfileImageURL,
-			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt,
-			&origUserName, &origUserProfileImageURL,
 			&p.LikeCount, &p.IsLikedByMe,
 			&p.BadCount, &p.IsBaddedByMe,
-			&p.ReplyCount,
-			&p.RetweetCount, &p.IsRetweetedByMe,
+			&p.ReplyCount, &p.RetweetCount, &p.IsRetweetedByMe,
 			&p.IsBookmarkedByMe,
+			&origPostID, &origUserID, &origContent, &origImageURL, &origCreatedAt, &origUserName, &origUserProfileImageURL,
+			&parentP_PostID, &parentP_UserID, &parentU_Name,
 		)
 		if err != nil {
 			log.Printf("エラー: rows.Scan (bookmarks) に失敗しました: %v", err)
