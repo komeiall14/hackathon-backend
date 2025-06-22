@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"regexp"
     "sort"
+	"sync"
 	"math/rand"
     "time"
 	"cloud.google.com/go/storage"
@@ -2031,14 +2032,69 @@ func updateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "プロフィールを更新しました。"})
 }
 
+func getMeHandler(w http.ResponseWriter, r *http.Request) {
+    // authMiddlewareによってコンテキストに保存されたユーザーIDを取得
+    currentUserID, ok := r.Context().Value(userIDKey).(string)
+    if !ok {
+        http.Error(w, "認証情報が見つかりません", http.StatusUnauthorized)
+        return
+    }
+
+    // getUserProfileHandlerのロジックを再利用して、自分自身の情報を取得
+    var u UserResForHTTPGet
+    var age sql.NullInt64
+    var firebaseUIDFromDB, bio, profileImageURL, headerImageURL sql.NullString
+
+    query := `
+        SELECT
+            id, name, age, firebase_uid, bio, profile_image_url, header_image_url,
+            (SELECT COUNT(*) FROM follows WHERE follower_id = user.firebase_uid) AS following_count,
+            (SELECT COUNT(*) FROM follows WHERE following_id = user.firebase_uid) AS follower_count,
+            FALSE AS is_following -- 自分自身なので常にfalse
+        FROM user
+        WHERE firebase_uid = ?
+    `
+    // 最初の?にログインユーザーID、2番目の?にプロフィールユーザーIDを渡す
+    err := db.QueryRow(query, currentUserID).Scan(
+        &u.Id, &u.Name, &age, &firebaseUIDFromDB, &bio, &profileImageURL, &headerImageURL,
+        &u.FollowingCount, &u.FollowerCount, &u.IsFollowing,
+    )
+
+    if err == sql.ErrNoRows {
+        http.Error(w, "ユーザーが見つかりません", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        log.Printf("ユーザープロフィールの取得エラー: %v", err)
+        http.Error(w, "サーバーエラー", http.StatusInternalServerError)
+        return
+    }
+
+    if age.Valid { ageInt := int(age.Int64); u.Age = &ageInt }
+    if firebaseUIDFromDB.Valid { u.FirebaseUID = &firebaseUIDFromDB.String }
+    if bio.Valid { u.Bio = &bio.String }
+    if profileImageURL.Valid { u.ProfileImageURL = &profileImageURL.String }
+    if headerImageURL.Valid { u.HeaderImageURL = &headerImageURL.String }
+    u.IsMe = true // 自分自身の情報なので常にtrue
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(u)
+}
+
 
 // userRouterHandlerは /api/users/ へのリクエストをURLの末尾によってさらに振り分けます。
 
 func userRouterHandler(w http.ResponseWriter, r *http.Request) {
-	if strings.HasSuffix(r.URL.Path, "/follow") {
-		followHandler(w, r)
-		return
-	}
+    if strings.HasSuffix(r.URL.Path, "/me") {
+        // /api/users/me の場合は、新しく作ったハンドラを呼び出す
+        // このエンドポイントは認証が必須なので、authMiddlewareでラップする必要がある
+        authMiddleware(http.HandlerFunc(getMeHandler)).ServeHTTP(w, r)
+        return
+    }
+    if strings.HasSuffix(r.URL.Path, "/follow") {
+        followHandler(w, r)
+        return
+    }
 	if strings.HasSuffix(r.URL.Path, "/following") {
 		followingListHandler(w, r)
 		return
@@ -2051,12 +2107,10 @@ func userRouterHandler(w http.ResponseWriter, r *http.Request) {
 		userPostsHandler(w, r)
 		return
 	}
-	// ▼▼▼ このifブロックを追加 ▼▼▼
 	if strings.HasSuffix(r.URL.Path, "/replies") {
 		userRepliesHandler(w, r)
 		return
 	}
-	// ▲▲▲ 追加ここまで ▲▲▲
 	getUserProfileHandler(w, r)
 }
 
@@ -3477,10 +3531,10 @@ func ogpHandler(w http.ResponseWriter, r *http.Request) {
 
 // WebSocketのメッセージ形式を定義
 type WebSocketMessage struct {
-	Type     string `json:"type"`
-	Content  string `json:"content"`
-	UserName string `json:"user_name"`
-	UserID   string `json:"user_id"`
+	Type     string      `json:"type"` // "message", "join", "leave", "role_change", "space_end"
+	Content  interface{} `json:"content"`
+	UserName string      `json:"user_name,omitempty"`
+	UserID   string      `json:"user_id,omitempty"`
 }
 
 // WebSocketのクライアントを管理するハブ
@@ -3489,6 +3543,7 @@ type Hub struct {
 	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
+	spaceID    string // このHubが管理するスペースのID
 }
 
 // 各WebSocket接続を表すクライアント
@@ -3498,32 +3553,65 @@ type Client struct {
 	send     chan []byte
 	userName string
 	userID   string
+	role     string // "host", "speaker", "listener"
+}
+
+type SpaceParticipant struct {
+	UserID          string `json:"user_id"`
+	UserName        string `json:"user_name"`
+	Role            string `json:"role"`
+	ProfileImageURL string `json:"profile_image_url"`
+}
+
+type SpaceInfo struct {
+	ID        string `json:"id"`
+	HostID    string `json:"host_id"`
+	HostName  string `json:"host_name"`
+	Topic     string `json:"topic"`
+	CreatedAt string `json:"created_at"`
+	Participants []SpaceParticipant `json:"participants"`
 }
 
 // グローバルなハブを生成
-var hub = newHub()
+var (
+	hubs      = make(map[string]*Hub) // key: spaceId, value: Hub
+	hubsMutex = sync.RWMutex{}      // hubsマップを安全に操作するためのMutex
+)
 
-func newHub() *Hub {
+
+func newHub(spaceID string) *Hub {
 	return &Hub{
 		broadcast:  make(chan []byte),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
+		spaceID:    spaceID,
 	}
 }
 
 // Hubをゴルーチンとして実行
 func (h *Hub) run() {
+	defer func() {
+		// Hubが終了する際に、管理下の全クライアント接続を閉じ、グローバルマップから自身を削除
+		hubsMutex.Lock()
+		delete(hubs, h.spaceID)
+		hubsMutex.Unlock()
+		log.Printf("Hub for space %s has been closed and removed.", h.spaceID)
+	}()
+
 	for {
 		select {
-		case client := <-h.register:
+		case client, ok := <-h.register:
+			if !ok { return } // チャンネルが閉じられた
 			h.clients[client] = true
-		case client := <-h.unregister:
+		case client, ok := <-h.unregister:
+			if !ok { return }
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
 			}
-		case message := <-h.broadcast:
+		case message, ok := <-h.broadcast:
+			if !ok { return }
 			for client := range h.clients {
 				select {
 				case client.send <- message:
@@ -3549,22 +3637,89 @@ var upgrader = websocket.Upgrader{
 // クライアントからのメッセージを読み取り、ハブにブロードキャストする
 func (c *Client) readPump() {
 	defer func() {
+		// ユーザー退出をブロードキャスト
+		leaveMsgContent := map[string]string{"user_id": c.userID, "user_name": c.userName}
+		leaveMsg, _ := json.Marshal(WebSocketMessage{Type: "user_left", Content: leaveMsgContent})
+		c.hub.broadcast <- leaveMsg
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Printf("error: %v", err)
 			break
 		}
-		// メッセージに送信者情報を付加してブロードキャスト
+
 		var msg WebSocketMessage
-		if err := json.Unmarshal(message, &msg); err == nil {
+		if err := json.Unmarshal(message, &msg); err != nil {
+			log.Printf("error unmarshalling message: %v", err)
+			continue
+		}
+
+		// ★★★ 変更点: メッセージタイプに応じて処理を分岐 ★★★
+		switch msg.Type {
+		case "message":
+			// ロールが 'host' or 'speaker' でなければ発言させない
+			if c.role != "host" && c.role != "speaker" {
+				log.Printf("Permission denied: User %s (%s) with role '%s' tried to speak.", c.userName, c.userID, c.role)
+				continue // メッセージを破棄
+			}
+
+			// ブロードキャストするメッセージに送信者情報を付加
 			msg.UserName = c.userName
 			msg.UserID = c.userID
 			jsonMsg, _ := json.Marshal(msg)
 			c.hub.broadcast <- jsonMsg
+
+		case "role_change":
+			// ロール変更はホストのみ可能
+			if c.role != "host" {
+				log.Printf("Permission denied: Non-host user %s tried to change role.", c.userName)
+				continue
+			}
+
+			// contentをパース
+			contentMap, ok := msg.Content.(map[string]interface{})
+			if !ok {
+				log.Printf("Invalid role_change content format")
+				continue
+			}
+			targetUserID, _ := contentMap["target_user_id"].(string)
+			newRole, _ := contentMap["new_role"].(string)
+
+			if targetUserID == "" || (newRole != "speaker" && newRole != "listener") {
+				log.Printf("Invalid role_change payload: target_user_id or new_role is invalid")
+				continue
+			}
+			
+			// DBを更新
+			_, err := db.Exec("UPDATE space_participants SET role = ? WHERE space_id = ? AND user_id = ?", newRole, c.hub.spaceID, targetUserID)
+			if err != nil {
+				log.Printf("Failed to update role in DB: %v", err)
+				continue
+			}
+
+			// メモリ上のClientのロールも更新
+			var targetUserName string
+			for client := range c.hub.clients {
+				if client.userID == targetUserID {
+					client.role = newRole
+					targetUserName = client.userName
+					break
+				}
+			}
+
+			// 全員に変更を通知
+			if targetUserName != "" {
+				updatedContent := map[string]string{
+					"user_id":   targetUserID,
+					"user_name": targetUserName,
+					"role":      newRole,
+				}
+				roleUpdatedMsg, _ := json.Marshal(WebSocketMessage{Type: "role_updated", Content: updatedContent})
+				c.hub.broadcast <- roleUpdatedMsg
+				log.Printf("Role of user %s changed to %s by host %s", targetUserID, newRole, c.userName)
+			}
 		}
 	}
 }
@@ -3585,46 +3740,100 @@ func (c *Client) writePump() {
 	}
 }
 
+
+// serveWsはWebSocket接続を処理します
 func serveWs(w http.ResponseWriter, r *http.Request) {
+	// URLからspaceIDを取得 e.g., /api/spaces/ws/{space_id}
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 5 {
+		http.Error(w, "Space ID is required", http.StatusBadRequest)
+		return
+	}
+	spaceID := pathSegments[4]
+
+	// クエリパラメータから認証トークンを取得
 	tokenStr := r.URL.Query().Get("token")
 	if tokenStr == "" {
-		log.Println("WS Error: Token is required in query parameter")
-		http.Error(w, "Token is required", http.StatusUnauthorized)
+		log.Println("WS Error: Auth token is missing from query parameters")
+		http.Error(w, "Authentication token is required", http.StatusUnauthorized)
 		return
 	}
 
+	// Firebaseでトークンを検証
 	token, err := firebaseAuth.VerifyIDToken(context.Background(), tokenStr)
 	if err != nil {
-		log.Printf("WS Error: error verifying ID token: %v\n", err)
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		log.Printf("WS Error: Failed to verify ID token: %v", err)
+		http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
 		return
 	}
 	userID := token.UID
 
-	var userName string
-	err = db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&userName)
-	if err != nil {
-		userName = "名無しさん"
-	}
+	// ユーザー情報（名前、役割、プロフィール画像）をDBから取得
+	var userName, role string
+	var profileImageURL sql.NullString
+	err = db.QueryRow(`
+		SELECT u.name, sp.role, u.profile_image_url
+		FROM user u
+		JOIN space_participants sp ON u.firebase_uid = sp.user_id
+		WHERE u.firebase_uid = ? AND sp.space_id = ?`, userID, spaceID).Scan(&userName, &role, &profileImageURL)
 
-	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("WS Error: User %s is not a participant of space %s", userID, spaceID)
+			http.Error(w, "You are not a participant of this space.", http.StatusForbidden)
+			return
+		}
+		log.Printf("WS Error: Failed to get user info or role for user %s in space %s: %v", userID, spaceID, err)
+		http.Error(w, "Failed to get user information.", http.StatusInternalServerError)
 		return
 	}
+
+	// 対応するHubを取得または作成
+	hubsMutex.Lock()
+	hub, exists := hubs[spaceID]
+	if !exists {
+		// DB上は存在するはずだが、サーバー再起動などでHubが消えた場合
+		hub = newHub(spaceID)
+		go hub.run()
+		hubs[spaceID] = hub
+		log.Printf("Re-created hub for space %s", spaceID)
+	}
+	hubsMutex.Unlock()
+
+	// HTTP接続をWebSocketにアップグレード
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade connection to WebSocket: %v", err)
+		return
+	}
+
+	// 新しいクライアントを作成
 	client := &Client{
 		hub:      hub,
 		conn:     conn,
 		send:     make(chan []byte, 256),
 		userName: userName,
 		userID:   userID,
+		role:     role,
 	}
 	client.hub.register <- client
 
+	// 参加したことを他のクライアントにブロードキャスト
+	joinMsgContent := SpaceParticipant{
+		UserID:   userID,
+		UserName: userName,
+		Role:     role,
+	}
+	if profileImageURL.Valid {
+		joinMsgContent.ProfileImageURL = profileImageURL.String
+	}
+	joinMsg, _ := json.Marshal(WebSocketMessage{Type: "user_joined", Content: joinMsgContent})
+	hub.broadcast <- joinMsg
+
+	// メッセージの読み書きのためのゴルーチンを起動
 	go client.writePump()
 	go client.readPump()
 }
-
 // sendSlackNotification は、指定されたメッセージをSlackに送信します。
 func sendSlackNotification(message string) {
 	webhookURL := os.Getenv("SLACK_WEBHOOK_URL")
@@ -4165,10 +4374,240 @@ func HandleEvaluateExplanation(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(evalResponse)
 }
 
+// handleCreateSpace は新しいスペースを作成します
+func handleCreateSpace(w http.ResponseWriter, r *http.Request) {
+	log.Printf("--- HANDLER INVOKED: handleCreateSpace, PATH: %s", r.URL.Path)
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
+
+	var req struct { Topic string `json:"topic"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+    // 先にホストのユーザー名を取得する
+    var hostName string
+    err := db.QueryRow("SELECT name FROM user WHERE firebase_uid = ?", userID).Scan(&hostName)
+    if err != nil {
+        log.Printf("Failed to get host name for user %s: %v", userID, err)
+        http.Error(w, "Failed to get user information", http.StatusInternalServerError)
+        return
+    }
+
+	tx, err := db.Begin()
+	if err != nil { /* ...既存のエラー処理... */ return }
+	defer tx.Rollback()
+
+	// 新しいスペースを作成
+	spaceID := ulid.Make().String()
+	_, err = tx.Exec("INSERT INTO spaces (id, host_id, topic) VALUES (?, ?, ?)", spaceID, userID, req.Topic)
+	if err != nil { /* ...既存のエラー処理... */ return }
+
+	// ホストを参加者として追加
+	_, err = tx.Exec("INSERT INTO space_participants (space_id, user_id, role) VALUES (?, ?, 'host')", spaceID, userID)
+	if err != nil { /* ...既存のエラー処理... */ return }
+	
+	if err := tx.Commit(); err != nil { /* ...既存のエラー処理... */ return }
+
+	// 新しいHubを生成して起動
+	hubsMutex.Lock()
+	if _, exists := hubs[spaceID]; !exists {
+		hub := newHub(spaceID)
+		go hub.run()
+		hubs[spaceID] = hub
+	}
+	hubsMutex.Unlock()
+
+	// 全ユーザー（ボット以外）に通知を作成
+    // go func の部分を修正
+	go func(spaceID, topic, hostFirebaseID, retrievedHostName string) {
+		rows, err := db.Query("SELECT firebase_uid FROM user WHERE firebase_uid NOT LIKE 'bot_%' AND firebase_uid != ?", hostFirebaseID)
+		if err != nil { log.Printf("Failed to get users for space notification: %v", err); return }
+		defer rows.Close()
+
+		for rows.Next() {
+			var recipientID string
+			if err := rows.Scan(&recipientID); err != nil { continue }
+			
+			notificationID := ulid.Make().String()
+			_, err := db.Exec(
+				"INSERT INTO notifications (id, recipient_id, actor_id, type, entity_id) VALUES (?, ?, ?, 'space_started', ?)",
+				notificationID, recipientID, hostFirebaseID, spaceID,
+			)
+			if err != nil { log.Printf("Failed to create space notification: %v", err) }
+		}
+	}(spaceID, req.Topic, userID, hostName) // 引数に userID と取得した hostName を渡す
+
+
+	log.Printf("New space created by %s. Space ID: %s", userID, spaceID)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"space_id": spaceID})
+}
+
+// handleGetActiveSpaces はアクティブなスペース一覧を返します
+func handleGetActiveSpaces(w http.ResponseWriter, r *http.Request) {
+	log.Printf("--- HANDLER INVOKED: handleGetActiveSpaces, PATH: %s", r.URL.Path)
+	rows, err := db.Query(`
+		SELECT s.id, s.host_id, u.name, s.topic, s.created_at
+		FROM spaces s
+		JOIN user u ON s.host_id = u.firebase_uid
+		WHERE s.ended_at IS NULL
+		ORDER BY s.created_at DESC
+	`)
+	if err != nil { /* ...エラー処理... */ return }
+	defer rows.Close()
+
+	spaces := make([]SpaceInfo, 0)
+	for rows.Next() {
+		var s SpaceInfo
+		if err := rows.Scan(&s.ID, &s.HostID, &s.HostName, &s.Topic, &s.CreatedAt); err != nil { continue }
+		spaces = append(spaces, s)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(spaces)
+}
+
+
+// handleEndSpace はホストがスペースを終了させます
+func handleEndSpace(w http.ResponseWriter, r *http.Request) {
+    log.Printf("--- HANDLER INVOKED: handleEndSpace, PATH: %s", r.URL.Path)
+    userID, ok := r.Context().Value(userIDKey).(string)
+    if !ok { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
+
+    pathSegments := strings.Split(r.URL.Path, "/")
+    if len(pathSegments) < 5 {
+        http.Error(w, "Space ID required", http.StatusBadRequest)
+        return
+    }
+    spaceID := pathSegments[4]
+
+    // ホスト本人か確認
+    var hostID string
+    err := db.QueryRow("SELECT host_id FROM spaces WHERE id = ?", spaceID).Scan(&hostID)
+    if err != nil { http.Error(w, "Space not found", http.StatusNotFound); return }
+    if hostID != userID { http.Error(w, "Only the host can end the space", http.StatusForbidden); return }
+
+    // スペースを終了状態に更新
+    _, err = db.Exec("UPDATE spaces SET ended_at = CURRENT_TIMESTAMP WHERE id = ?", spaceID)
+    if err != nil { http.Error(w, "Failed to end space", http.StatusInternalServerError); return }
+
+    // WebSocketで終了を通知し、Hubを閉じる
+    hubsMutex.RLock()
+    hub, exists := hubs[spaceID]
+    hubsMutex.RUnlock()
+
+    if exists {
+        endMsg, _ := json.Marshal(WebSocketMessage{Type: "space_end", Content: "The host has ended the space."})
+        hub.broadcast <- endMsg
+        // Hubのループを安全に終了させるために、ブロードキャストチャネルを閉じる
+        close(hub.broadcast)
+    }
+
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]string{"message": "Space ended successfully"})
+}
+
+
+func handleJoinSpace(w http.ResponseWriter, r *http.Request) {
+	log.Printf("--- HANDLER INVOKED: handleJoinSpace, PATH: %s", r.URL.Path)
+    userID, ok := r.Context().Value(userIDKey).(string)
+    if !ok { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
+
+    pathSegments := strings.Split(r.URL.Path, "/")
+    if len(pathSegments) < 5 { // e.g. ["", "api", "spaces", "join", "{id}"]
+        http.Error(w, "Space ID required", http.StatusBadRequest)
+        return
+    }
+    spaceID := pathSegments[4] 
+
+    _, err := db.Exec(`
+        INSERT INTO space_participants (space_id, user_id, role)
+        VALUES (?, ?, 'listener')
+        ON DUPLICATE KEY UPDATE user_id=user_id
+    `, spaceID, userID)
+
+    if err != nil {
+        log.Printf("Failed to join space: %v", err)
+        http.Error(w, "Failed to join space", http.StatusInternalServerError)
+        return
+    }
+
+    log.Printf("User %s joined space %s as a listener", userID, spaceID)
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]string{"message": "Successfully joined the space."})
+}
+
+
+// handleGetSpaceDetailsは、単一のスペースの詳細情報と参加者リストを返します。
+func handleGetSpaceDetails(w http.ResponseWriter, r *http.Request) {
+	log.Printf("--- HANDLER INVOKED: handleGetSpaceDetails, PATH: %s", r.URL.Path)
+
+	pathSegments := strings.Split(r.URL.Path, "/")
+	if len(pathSegments) < 4 {
+		http.Error(w, "Space ID required", http.StatusBadRequest)
+		return
+	}
+	spaceID := pathSegments[3] // パスの最後の部分がID
+
+	// --- 1. スペースの基本情報を取得 ---
+	var s SpaceInfo
+	err := db.QueryRow(`
+        SELECT s.id, s.host_id, u.name, s.topic, s.created_at
+        FROM spaces s
+        JOIN user u ON s.host_id = u.firebase_uid
+        WHERE s.id = ? AND s.ended_at IS NULL
+    `, spaceID).Scan(&s.ID, &s.HostID, &s.HostName, &s.Topic, &s.CreatedAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Space not found or has ended", http.StatusNotFound)
+			return
+		}
+		log.Printf("Failed to get space details: %v", err)
+		http.Error(w, "Failed to get space details", http.StatusInternalServerError)
+		return
+	}
+
+	// --- 2. スペースの参加者リストを取得 ---
+	rows, err := db.Query(`
+		SELECT p.user_id, u.name, p.role, u.profile_image_url
+		FROM space_participants p
+		JOIN user u ON p.user_id = u.firebase_uid
+		WHERE p.space_id = ?
+		ORDER BY CASE p.role WHEN 'host' THEN 1 WHEN 'speaker' THEN 2 ELSE 3 END, u.name ASC
+	`, spaceID)
+	if err != nil {
+		log.Printf("Failed to get space participants: %v", err)
+		// 参加者リストの取得に失敗しても、基本情報だけでも返す
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s)
+		return
+	}
+	defer rows.Close()
+
+	participants := make([]SpaceParticipant, 0)
+	for rows.Next() {
+		var p SpaceParticipant
+		var profileURL sql.NullString
+		if err := rows.Scan(&p.UserID, &p.UserName, &p.Role, &profileURL); err != nil {
+			log.Printf("Error scanning participant: %v", err)
+			continue
+		}
+		if profileURL.Valid {
+			p.ProfileImageURL = profileURL.String
+		}
+		participants = append(participants, p)
+	}
+	s.Participants = participants // 取得したリストを構造体に追加
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s)
+}
+
 func main() {
     log.Println("main 関数を開始します...")
 
-	go hub.run() // WebSocketハブをバックグラウンドで起動
 
     mux := http.NewServeMux()
 
@@ -4213,13 +4652,18 @@ func main() {
 	mux.Handle("/api/gemini/evaluate-explanation", authMiddleware(http.HandlerFunc(HandleEvaluateExplanation)))
 
 	mux.Handle("/api/users/recommendations", authMiddleware(http.HandlerFunc(getRecommendedUsersHandler)))
-
 	mux.HandleFunc("/api/bot/create-and-post", createNewBotAndPostHandler)
-
 	mux.HandleFunc("/api/trends", trendsHandler)
+    mux.HandleFunc("/api/spaces/ws/", serveWs)
+    mux.Handle("/api/spaces/create", authMiddleware(http.HandlerFunc(handleCreateSpace)))
+    mux.Handle("/api/spaces/active", authMiddleware(http.HandlerFunc(handleGetActiveSpaces)))
+    mux.Handle("/api/spaces/join/", authMiddleware(http.HandlerFunc(handleJoinSpace)))
+    mux.Handle("/api/spaces/end/", authMiddleware(http.HandlerFunc(handleEndSpace)))
+    mux.Handle("/api/spaces/", authMiddleware(http.HandlerFunc(handleGetSpaceDetails)))
+ 
 
 
-	mux.HandleFunc("/api/space/ws", serveWs)
+
 	
 	// --- 古い/userエンドポイント（互換性のために残す） ---
 	mux.HandleFunc("/user", handler)
